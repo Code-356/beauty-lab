@@ -1196,6 +1196,8 @@ textarea:focus-visible {
   --accent-soft: #391612;
   --warning-soft: #2d210e;
   --success: #73c695;
+  color: var(--ink);
+  background: var(--app-bg);
   color-scheme: dark;
 }
 
@@ -1233,6 +1235,42 @@ textarea:focus-visible {
 .app-shell.eco-mode .canvas-stage {
   background-color: #000000;
   background-image: linear-gradient(#171817 1px, transparent 1px), linear-gradient(90deg, #171817 1px, transparent 1px);
+}
+
+.app-shell.eco-mode.no-document #gjs,
+.app-shell.eco-mode .editor-empty-state {
+  border-color: #383b37;
+  background: #050505;
+  box-shadow: none;
+}
+
+.app-shell.eco-mode .editor-empty-state,
+.app-shell.eco-mode .empty-state-content h1 {
+  color: var(--ink);
+}
+
+.app-shell.eco-mode .empty-state-kicker {
+  color: #ff8172;
+}
+
+.app-shell.eco-mode .empty-state-content p,
+.app-shell.eco-mode .empty-state-note {
+  color: var(--muted);
+}
+
+.app-shell.eco-mode .empty-state-icon {
+  color: #050505;
+  background: var(--ink);
+}
+
+.app-shell.eco-mode .statusbar {
+  color: var(--muted);
+  background: #0d0e0d;
+  border-color: var(--line);
+}
+
+.app-shell.eco-mode .drop-overlay {
+  background: rgba(13, 14, 13, 0.96);
 }
 
 .app-shell.eco-mode .gjs-frame-wrapper,
@@ -2210,7 +2248,15 @@ textarea:focus-visible {
           </div>
           <div class="changelog-list">
             <article class="release-entry current-release">
-              <div class="release-meta"><strong>v1.7</strong><time datetime="2026-08-19">2026-08-19</time><span>当前版本</span></div>
+              <div class="release-meta"><strong>v1.7.1</strong><time datetime="2026-08-19">2026-08-19</time><span>当前版本</span></div>
+              <h3>L4TF 首页显示修复</h3>
+              <ul>
+                <li>修复未载入 HTML 时欢迎画布仍为白色的问题，节能模式现在覆盖整个工作区。</li>
+                <li>补齐首页标题、说明文字、状态栏和辅助信息的深色主题对比度。</li>
+              </ul>
+            </article>
+            <article class="release-entry">
+              <div class="release-meta"><strong>v1.7</strong><time datetime="2026-08-19">2026-08-19</time></div>
               <h3>双语图文指南更新</h3>
               <ul>
                 <li>新增完整的中英双语用户指南，覆盖全部编辑、保存、导出及离线使用流程。</li>
@@ -2392,6 +2438,9 @@ lucide.createIcons({icons});\``);if(typeof c>"u")throw new Error("`createIcons()
     "新增完整的中英双语用户指南，覆盖全部编辑、保存、导出及离线使用流程。": "Added a complete bilingual user guide covering editing, saving, exporting, and offline use.",
     "指南使用脱敏合成报告的真实界面截图，支持全文搜索、章节定位、阅读进度和打印 PDF。": "The guide uses real interface screenshots with sanitized synthetic content and supports full-text search, section navigation, reading progress, and PDF printing.",
     "文件夹版与单文件版均可离线打开指南，并自动沿用 Beauty Lab 当前语言。": "Both folder and standalone editions open the guide offline and automatically carry over the current Beauty Lab language.",
+    "L4TF 首页显示修复": "L4TF Home Screen Display Fix",
+    "修复未载入 HTML 时欢迎画布仍为白色的问题，节能模式现在覆盖整个工作区。": "Fixed the welcome canvas remaining white before an HTML file is loaded; energy-saving mode now covers the entire workspace.",
+    "补齐首页标题、说明文字、状态栏和辅助信息的深色主题对比度。": "Improved dark-theme contrast for the home title, instructions, status bar, and supporting information.",
     "主页菜单与文件名更新": "Home Menu and File Name Update",
     "修复未载入 HTML 时“更多操作”菜单被主页欢迎层遮挡的问题。": "Fixed the More actions menu being covered by the welcome screen before an HTML file is loaded.",
     "粘贴代码后可点击顶部文件名修改导出名称，并自动补全 .html 扩展名。": "After pasting code, click the file name in the top bar to rename the export; the .html extension is added automatically.",
