@@ -22,6 +22,7 @@
     "更多操作": "More actions",
     "工具设置": "Tool settings",
     "用户指南": "User Guide",
+    "下载离线包": "Download Offline Package",
     "反馈与建议": "Feedback & Suggestions",
     "更新日志": "Changelog",
     "切换中英文": "Switch Chinese / English",

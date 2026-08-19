@@ -14,6 +14,10 @@ Files selected in the editor are processed locally in the browser. Beauty Lab do
 
 The bilingual guide is available at `Beauty-Lab-User-Guide.html` and from **More actions > User Guide** inside the editor.
 
+## Offline package
+
+Use **More actions > Download Offline Package** to download `Beauty-Lab-Offline.zip` directly from the GitHub repository.
+
 ## Browser support
 
 Use a current version of Microsoft Edge or Google Chrome. Some advanced browser APIs, including direct overwrite of a local file, depend on browser permissions and may behave differently when the editor is opened from a public website.
