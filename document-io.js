@@ -112,6 +112,9 @@
     const externalResources = Array.from(
       documentNode.querySelectorAll('[src^="http:"], [src^="https:"], [href^="http:"], [href^="https:"]'),
     ).length;
+    const stylesheetLinks = Array.from(documentNode.querySelectorAll('link[rel~="stylesheet" i][href]'))
+      .map((link) => attributesToRecord(link));
+    const baseHref = documentNode.querySelector("base[href]")?.getAttribute("href") || "";
     const canvasCount = documentNode.querySelectorAll("canvas").length;
     const svgCount = documentNode.querySelectorAll("svg").length;
     const frameworkMarkers = documentNode.querySelectorAll("script").length > 0 &&
@@ -147,6 +150,8 @@
       bodyHtml: documentNode.body.innerHTML,
       css,
       scripts,
+      stylesheetLinks,
+      baseHref,
       warnings: buildWarnings({
         scripts: scripts.length,
         inlineHandlers: inlineHandlerCount,
@@ -173,10 +178,10 @@
     const warnings = [];
     if (counts.scripts || counts.inlineHandlers || counts.javascriptLinks) {
       warnings.push({
-        level: "warning",
-        icon: "shield-alert",
-        title: `编辑时已禁用 ${counts.scripts + counts.inlineHandlers + counts.javascriptLinks} 项脚本行为`,
-        detail: "原脚本和内联事件会在预览及导出文件中恢复。依赖原始 DOM 结构的脚本需要重点检查。",
+        level: "info",
+        icon: "play",
+        title: `检测到 ${counts.scripts + counts.inlineHandlers + counts.javascriptLinks} 项脚本行为`,
+        detail: "页面脚本会在隔离环境中运行，运行后的 DOM 和样式将转换为可编辑副本；原脚本仍会在预览和导出文件中运行。",
       });
     }
     if (counts.activeEmbeds) {
@@ -206,9 +211,9 @@
     if (counts.externalResources) {
       warnings.push({
         level: "warning",
-        icon: "wifi-off",
+        icon: "download",
         title: `检测到 ${counts.externalResources} 个网络资源`,
-        detail: "编辑画布和安全预览会阻止网络访问。请把图片、字体和脚本改为内嵌资源，确保断网演示正常。",
+        detail: "导入和预览会尝试加载网络脚本、样式、字体和图片；断网使用前仍应将这些资源内嵌到 HTML。",
       });
     }
     if (counts.frameworkMarkers) {
@@ -303,40 +308,23 @@
     return output;
   }
 
-  function mergeRuntimeSnapshot(state, runtimeBodyHtml) {
+  function mergeRuntimeSnapshot(state, runtimeSnapshot) {
     const parser = new DOMParser();
-    const baseDocument = parser.parseFromString(`<!doctype html><html><body>${state.bodyHtml || ""}</body></html>`, "text/html");
-    const runtimeDocument = parser.parseFromString(`<!doctype html><html><body>${runtimeBodyHtml || ""}</body></html>`, "text/html");
+    const snapshot = typeof runtimeSnapshot === "string" ? { body: runtimeSnapshot, css: "" } : (runtimeSnapshot || {});
+    const runtimeDocument = parser.parseFromString(`<!doctype html><html><body>${snapshot.body || ""}</body></html>`, "text/html");
     runtimeDocument.querySelectorAll("script, template[data-frameedit-script-id]").forEach((node) => node.remove());
     disableActiveContent(runtimeDocument);
-    const runtimeCss = normalizeInlineStyles(runtimeDocument, "beautylab-runtime-style-");
-    let mergedRegions = 0;
-    let mergedSelects = 0;
-
-    Array.from(baseDocument.body.querySelectorAll("[id]")).forEach((baseElement) => {
-      const runtimeElement = runtimeDocument.getElementById(baseElement.id);
-      if (!runtimeElement) return;
-      if (baseElement.tagName === "SELECT") {
-        if (runtimeElement.querySelector("option")) {
-          baseElement.innerHTML = runtimeElement.innerHTML;
-          mergedSelects += 1;
-        }
-        return;
-      }
-      const baseHasContent = Boolean(baseElement.textContent.trim() || baseElement.children.length);
-      const runtimeHasContent = Boolean(runtimeElement.textContent.trim() || runtimeElement.children.length);
-      if (!baseHasContent && runtimeHasContent) {
-        baseElement.innerHTML = runtimeElement.innerHTML;
-        baseElement.setAttribute("data-beautylab-runtime-snapshot", "");
-        mergedRegions += 1;
-      }
-    });
+    assignSelectIds(runtimeDocument);
+    const runtimeInlineCss = normalizeInlineStyles(runtimeDocument, "beautylab-runtime-style-");
+    const runtimeCss = [snapshot.css, runtimeInlineCss].filter((value) => String(value || "").trim()).join("\n\n");
+    const bodyHtml = runtimeDocument.body.innerHTML;
 
     return {
-      bodyHtml: baseDocument.body.innerHTML,
+      bodyHtml: bodyHtml || state.bodyHtml,
       css: runtimeCss,
-      mergedRegions,
-      mergedSelects,
+      mergedRegions: runtimeDocument.body.querySelectorAll("*").length,
+      mergedSelects: runtimeDocument.body.querySelectorAll("select").length,
+      snapshotApplied: Boolean(bodyHtml.trim()),
     };
   }
 
@@ -346,7 +334,55 @@
     const documentNode = parser.parseFromString(createPreviewDocument(output), "text/html");
     const reporter = documentNode.createElement("script");
     reporter.setAttribute("data-beautylab-snapshot-reporter", "");
-    reporter.textContent = `(function(){var reporter=document.currentScript;setTimeout(function(){if(reporter)reporter.remove();parent.postMessage({type:"beautylab-runtime-snapshot",token:${JSON.stringify(token)},body:document.body.innerHTML},"*");},180);}());`;
+    reporter.textContent = `(function () {
+      var sent = false;
+      function syncFormState() {
+        Array.from(document.querySelectorAll("input")).forEach(function (input) {
+          if (input.type === "checkbox" || input.type === "radio") input.toggleAttribute("checked", input.checked);
+          else if (input.type !== "file") input.setAttribute("value", input.value);
+        });
+        Array.from(document.querySelectorAll("textarea")).forEach(function (textarea) { textarea.textContent = textarea.value; });
+        Array.from(document.querySelectorAll("option")).forEach(function (option) { option.toggleAttribute("selected", option.selected); });
+      }
+      function collectRuntimeCss() {
+        var chunks = [];
+        Array.from(document.styleSheets).forEach(function (sheet) {
+          var owner = sheet.ownerNode;
+          if (owner && owner.matches && owner.matches("style[data-frameedit-styles]")) return;
+          try {
+            var css = Array.from(sheet.cssRules || []).map(function (rule) { return rule.cssText; }).join("\\n");
+            if (css && chunks.indexOf(css) === -1) chunks.push(css);
+          } catch (_) {}
+        });
+        return chunks.join("\\n\\n");
+      }
+      function send() {
+        if (sent) return;
+        sent = true;
+        var bodyHtml = document.body.innerHTML;
+        var css = "";
+        var error = "";
+        try {
+          syncFormState();
+          var body = document.body.cloneNode(true);
+          Array.from(body.querySelectorAll("script, template[data-frameedit-script-id]")).forEach(function (node) { node.remove(); });
+          bodyHtml = body.innerHTML;
+          css = collectRuntimeCss();
+        } catch (snapshotError) {
+          error = String((snapshotError && snapshotError.message) || snapshotError || "Runtime snapshot failed");
+        }
+        parent.postMessage({
+          type: "beautylab-runtime-snapshot",
+          token: ${JSON.stringify(token)},
+          body: bodyHtml,
+          css: css,
+          error: error
+        }, "*");
+      }
+      if (document.readyState === "complete") setTimeout(send, 600);
+      else window.addEventListener("load", function () { setTimeout(send, 600); }, { once: true });
+      setTimeout(send, 4500);
+    })();`;
     documentNode.body.append(reporter);
     return `<!doctype html>\n${documentNode.documentElement.outerHTML}`;
   }
@@ -360,7 +396,7 @@
     csp.setAttribute("http-equiv", "Content-Security-Policy");
     csp.setAttribute(
       "content",
-      "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline' data:; script-src 'unsafe-inline' data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+      "default-src 'none'; img-src data: blob: http: https:; media-src data: blob: http: https:; font-src data: blob: http: https:; style-src 'unsafe-inline' data: blob: http: https:; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data: blob: http: https:; connect-src data: blob: http: https: ws: wss:; frame-src data: blob: http: https:; worker-src data: blob:; object-src 'none'; base-uri 'self' data: http: https:; form-action 'none'",
     );
     documentNode.head.prepend(csp);
 

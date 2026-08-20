@@ -707,6 +707,31 @@
     }
   }
 
+  function injectCanvasStylesheetLinks(links = [], baseHref = "") {
+    const frameDocument = editor.Canvas.getDocument();
+    if (!frameDocument) return;
+    frameDocument.querySelectorAll('[data-beautylab-external-style], base[data-beautylab-base]').forEach((node) => node.remove());
+
+    if (baseHref) {
+      const base = frameDocument.createElement("base");
+      base.setAttribute("data-beautylab-base", "");
+      base.href = baseHref;
+      frameDocument.head.prepend(base);
+    }
+
+    const anchor = frameDocument.querySelector('style[data-frameedit-original-css]') || frameDocument.head.firstChild;
+    const fragment = frameDocument.createDocumentFragment();
+    links.forEach((attributes) => {
+      const link = frameDocument.createElement("link");
+      ["href", "rel", "media", "crossorigin", "referrerpolicy", "integrity", "type"].forEach((name) => {
+        if (attributes?.[name] != null) link.setAttribute(name, attributes[name]);
+      });
+      link.setAttribute("data-beautylab-external-style", "");
+      fragment.append(link);
+    });
+    frameDocument.head.insertBefore(fragment, anchor);
+  }
+
   function requestRuntimeSnapshot(parsed) {
     if (!parsed.scripts.length) return Promise.resolve(null);
     return new Promise((resolve) => {
@@ -724,14 +749,17 @@
         resolve(result);
       };
       const receive = (event) => {
-        if (event.source !== frame.contentWindow) return;
         if (event.data?.type !== "beautylab-runtime-snapshot" || event.data?.token !== token) return;
-        finish(String(event.data.body || ""));
+        finish({
+          body: String(event.data.body || ""),
+          css: String(event.data.css || ""),
+          error: String(event.data.error || ""),
+        });
       };
       window.addEventListener("message", receive);
       document.body.append(frame);
       frame.srcdoc = FrameEditIO.createRuntimeSnapshotDocument(parsed, token);
-      window.setTimeout(() => finish(null), 1400);
+      window.setTimeout(() => finish(null), 7000);
     });
   }
 
@@ -745,25 +773,38 @@
     }
 
     if (parsed.scripts.length) {
-      const runtimeBody = await requestRuntimeSnapshot(parsed);
-      if (runtimeBody) {
-        const snapshot = FrameEditIO.mergeRuntimeSnapshot(parsed, runtimeBody);
-        if (snapshot.mergedRegions || snapshot.mergedSelects) {
+      const runtimeSnapshot = await requestRuntimeSnapshot(parsed);
+      if (runtimeSnapshot?.body) {
+        const snapshot = FrameEditIO.mergeRuntimeSnapshot(parsed, runtimeSnapshot);
+        if (snapshot.snapshotApplied) {
           parsed = {
             ...parsed,
             bodyHtml: snapshot.bodyHtml,
-            css: [parsed.css, snapshot.css && `/* Safe runtime snapshot styles */\n${snapshot.css}`].filter(Boolean).join("\n\n"),
+            css: [parsed.css, snapshot.css && `/* Isolated runtime snapshot styles */\n${snapshot.css}`].filter(Boolean).join("\n\n"),
             warnings: [
               ...parsed.warnings,
               {
                 level: "info",
                 icon: "scan-eye",
-                title: `已显示 ${snapshot.mergedRegions} 个脚本生成区域`,
-                detail: "图表和动态内容以隔离沙箱中的静态快照载入；原脚本仍只在最终预览和导出文件中运行。",
+                title: "已载入脚本运行后的可编辑页面",
+                detail: "普通 DOM 文字、图片和样式可以继续修改；Canvas、Shadow DOM 及脚本反复重建的内容仍需在最终预览中检查。",
               },
             ],
           };
         }
+      } else {
+        parsed = {
+          ...parsed,
+          warnings: [
+            ...parsed.warnings,
+            {
+              level: "warning",
+              icon: "triangle-alert",
+              title: "页面脚本未在限定时间内完成",
+              detail: "编辑器已载入原始 DOM。请检查网络依赖，或在最终预览中确认需要较长时间初始化的内容。",
+            },
+          ],
+        };
       }
     }
 
@@ -774,6 +815,7 @@
     editor.setStyle(parsed.css);
     applyBodyAttributes(parsed.bodyAttributes);
     injectRawCanvasCss(parsed.css);
+    injectCanvasStylesheetLinks(parsed.stylesheetLinks, parsed.baseHref);
     state.document = parsed;
     state.modifiedSelectIds.clear();
     state.fileHandle = fileHandle;
@@ -1097,7 +1139,8 @@
 
   function findComponentByElement(component, element) {
     if (!component || !element) return null;
-    if (component.getEl?.() === element || (element.id && component.getId?.() === element.id)) return component;
+    const componentId = component.getAttributes?.().id || component.getId?.();
+    if (component.getEl?.() === element || (element.id && componentId === element.id)) return component;
     let match = null;
     component.components?.().forEach((child) => {
       if (!match) match = findComponentByElement(child, element);
@@ -1124,7 +1167,9 @@
     preparedCanvasElements.add(element);
     const selectComponent = (event) => {
       if (typeof event.button === "number" && event.button !== 0) return;
-      if (getSelected() !== component) editor.select(component);
+      window.setTimeout(() => {
+        if (getSelected() !== component) editor.select(component);
+      }, 0);
     };
     element.addEventListener("pointerdown", selectComponent, true);
     element.addEventListener("click", selectComponent, true);
@@ -1156,13 +1201,17 @@
   function installCanvasSafety() {
     const frameDocument = editor.Canvas.getDocument();
     const frameRoot = frameDocument?.body;
-    if (!frameRoot || preparedCanvasDocuments.has(frameRoot)) return;
-    preparedCanvasDocuments.add(frameRoot);
+    if (!frameRoot) return;
     installMountedComponentSelection(editor.DomComponents.getWrapper());
+    if (preparedCanvasDocuments.has(frameRoot)) return;
+    preparedCanvasDocuments.add(frameRoot);
     const selectCanvasTarget = (event) => {
       if (event.button !== 0) return;
       const component = getCanvasComponent(event.target);
-      if (component && getSelected() !== component) editor.select(component);
+      if (!component) return;
+      window.setTimeout(() => {
+        if (getSelected() !== component) editor.select(component);
+      }, 0);
     };
     frameDocument.addEventListener("pointerdown", selectCanvasTarget, true);
     frameDocument.addEventListener("click", selectCanvasTarget, true);
