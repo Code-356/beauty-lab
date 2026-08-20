@@ -292,14 +292,30 @@
   }
 
   function loadEditorStylesheet(url) {
-    if (!url || document.querySelector('link[data-beauty-lab-editor-style]')) return Promise.resolve();
+    if (!url) return Promise.resolve();
+    const existing = document.querySelector('link[data-beauty-lab-editor-style]');
+    if (existing?.dataset.loadState === "loaded" || existing?.sheet) return Promise.resolve();
+    if (existing?.dataset.loadState === "loading") {
+      return new Promise((resolve, reject) => {
+        existing.addEventListener("load", resolve, { once: true });
+        existing.addEventListener("error", () => reject(new Error("编辑器样式载入失败。")), { once: true });
+      });
+    }
+    existing?.remove();
     return new Promise((resolve, reject) => {
       const link = document.createElement("link");
       link.rel = "stylesheet";
       link.href = url;
       link.dataset.beautyLabEditorStyle = "";
-      link.addEventListener("load", resolve, { once: true });
-      link.addEventListener("error", () => reject(new Error("编辑器样式载入失败。")), { once: true });
+      link.dataset.loadState = "loading";
+      link.addEventListener("load", () => {
+        link.dataset.loadState = "loaded";
+        resolve();
+      }, { once: true });
+      link.addEventListener("error", () => {
+        link.dataset.loadState = "error";
+        reject(new Error("编辑器样式载入失败。"));
+      }, { once: true });
       const firstStylesheet = document.head.querySelector('link[rel="stylesheet"], style');
       document.head.insertBefore(link, firstStylesheet || null);
     });
@@ -308,21 +324,49 @@
   function loadEditorScript(url) {
     if (window.grapesjs) return Promise.resolve();
     const existing = document.querySelector('script[data-beauty-lab-editor-script]');
-    if (existing) {
+    if (existing?.dataset.loadState === "loading") {
       return new Promise((resolve, reject) => {
         existing.addEventListener("load", resolve, { once: true });
         existing.addEventListener("error", () => reject(new Error("编辑引擎载入失败。")), { once: true });
       });
     }
+    existing?.remove();
     if (!url) return Promise.reject(new Error("找不到编辑引擎资源。"));
     return new Promise((resolve, reject) => {
       const script = document.createElement("script");
       script.src = url;
       script.async = true;
       script.dataset.beautyLabEditorScript = "";
-      script.addEventListener("load", resolve, { once: true });
-      script.addEventListener("error", () => reject(new Error("编辑引擎载入失败。")), { once: true });
+      script.dataset.loadState = "loading";
+      script.addEventListener("load", () => {
+        script.dataset.loadState = "loaded";
+        resolve();
+      }, { once: true });
+      script.addEventListener("error", () => {
+        script.dataset.loadState = "error";
+        reject(new Error("编辑引擎载入失败。"));
+      }, { once: true });
       document.head.append(script);
+    });
+  }
+
+  function waitForEditorReady(instance, timeout = 15000) {
+    if (instance.getModel?.().get?.("ready")) return Promise.resolve(instance);
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        if (timer) window.clearTimeout(timer);
+        instance.off?.("load", handleReady);
+        if (error) reject(error);
+        else resolve(instance);
+      };
+      const handleReady = () => finish();
+      timer = window.setTimeout(() => finish(new Error("编辑器初始化超时，请刷新页面后重试。")), timeout);
+      if (typeof instance.onReady === "function") instance.onReady(handleReady);
+      else instance.once("load", handleReady);
     });
   }
 
@@ -340,10 +384,7 @@
       }
 
       const instance = createEditor();
-      if (!instance.getModel?.().get?.("ready")) {
-        await new Promise((resolve) => instance.once("load", resolve));
-      }
-      return instance;
+      return waitForEditorReady(instance);
     })()
       .catch((error) => {
         editorReadyPromise = null;
