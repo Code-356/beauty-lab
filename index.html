@@ -41,9 +41,14 @@
             <i data-lucide="clipboard-paste"></i><span>粘贴代码</span>
           </button>
           <span class="toolbar-divider" aria-hidden="true"></span>
-          <button id="preview-button" class="button button-secondary" type="button" disabled>
-            <i data-lucide="play"></i><span>预览</span>
-          </button>
+          <div id="mode-switch" class="mode-switch" role="group" aria-label="修改与预览模式">
+            <button id="edit-mode-button" class="mode-switch-button active" type="button" aria-pressed="true" disabled>
+              <i data-lucide="pencil"></i><span>修改</span>
+            </button>
+            <button id="preview-mode-button" class="mode-switch-button" type="button" aria-pressed="false" disabled>
+              <i data-lucide="play"></i><span>预览</span>
+            </button>
+          </div>
           <button id="save-button" class="icon-button" type="button" title="保存 Ctrl+S" aria-label="保存并覆盖当前文件" disabled>
             <i data-lucide="save"></i>
           </button>
@@ -202,6 +207,17 @@
               <h2 id="selected-component-name">样式</h2>
             </div>
           </div>
+          <div id="text-tools" class="context-panel text-content-panel" hidden>
+            <div class="text-content-header">
+              <div class="context-panel-copy">
+                <i data-lucide="text-cursor-input"></i>
+                <div><strong>文字内容</strong><span>只修改文字，不会删除图标或按钮功能</span></div>
+              </div>
+              <span id="text-content-count" class="option-count">0 处</span>
+            </div>
+            <div id="text-content-list" class="text-content-list"></div>
+            <p id="text-content-note" class="text-content-note" hidden>此元素包含多处文字，可分别修改。</p>
+          </div>
           <div id="select-tools" class="context-panel select-options-panel" hidden>
             <div class="select-options-header">
               <div class="context-panel-copy">
@@ -261,6 +277,24 @@
             <span>右侧将显示可以修改的样式</span>
           </div>
         </aside>
+
+        <section id="interactive-preview" class="interactive-preview" aria-label="交互预览" hidden>
+          <div class="interactive-preview-bar">
+            <span class="interactive-preview-status"><i data-lucide="shield-check"></i><span id="preview-status-text">脚本已在隔离预览中运行</span></span>
+            <div class="interactive-preview-actions">
+              <button id="retry-preview-sync-button" class="button button-secondary" type="button" hidden>
+                <i data-lucide="refresh-cw"></i><span>重试同步</span>
+              </button>
+              <button id="discard-preview-button" class="button button-secondary" type="button" hidden>
+                <i data-lucide="undo-2"></i><span>放弃预览变化并返回</span>
+              </button>
+              <button id="refresh-preview-button" class="icon-button" type="button" title="重新载入预览" aria-label="重新载入预览">
+                <i data-lucide="rotate-cw"></i>
+              </button>
+            </div>
+          </div>
+          <iframe id="preview-frame" sandbox="allow-scripts allow-modals allow-forms allow-pointer-lock" title="交互 HTML 预览"></iframe>
+        </section>
       </main>
 
       <dialog id="paste-dialog" class="dialog paste-dialog">
@@ -286,33 +320,6 @@
             </button>
           </div>
         </form>
-      </dialog>
-
-      <dialog id="preview-dialog" class="dialog preview-dialog">
-        <div class="preview-shell">
-          <div class="preview-header">
-            <div>
-              <span class="eyebrow">SANDBOX PREVIEW</span>
-              <h2>最终效果预览</h2>
-            </div>
-            <div class="preview-actions">
-              <span id="preview-warning-label" class="preview-warning-label"></span>
-              <button id="refresh-preview-button" class="icon-button" type="button" title="重新载入预览" aria-label="重新载入预览">
-                <i data-lucide="refresh-cw"></i>
-              </button>
-              <button id="close-preview-button" class="icon-button" type="button" title="关闭" aria-label="关闭">
-                <i data-lucide="x"></i>
-              </button>
-            </div>
-          </div>
-          <iframe id="preview-frame" sandbox="allow-scripts allow-modals allow-forms allow-pointer-lock" title="导出 HTML 预览"></iframe>
-          <div class="preview-footer">
-            <span><i data-lucide="shield-check"></i>预览与编辑器隔离，页面脚本与网络依赖可运行</span>
-            <button id="export-from-preview-button" class="button button-primary" type="button">
-              <i data-lucide="download"></i><span>导出 HTML</span>
-            </button>
-          </div>
-        </div>
       </dialog>
 
       <dialog id="warnings-dialog" class="dialog warnings-dialog">
@@ -361,7 +368,16 @@
           </div>
           <div class="changelog-list">
             <article class="release-entry current-release">
-              <div class="release-meta"><strong>v1.7.1</strong><time datetime="2026-08-19">2026-08-19</time><span>当前版本</span></div>
+              <div class="release-meta"><strong>v1.8</strong><time datetime="2026-08-20">2026-08-20</time><span>当前版本</span></div>
+              <h3>交互预览与修改同步</h3>
+              <ul>
+                <li>新增“修改｜预览”双模式，可在预览中运行脚本、点击按钮并切换动态页面。</li>
+                <li>返回修改模式时自动捕获当前 DOM、表单与显隐状态，动态页面中的普通内容可继续编辑。</li>
+                <li>导出文件会在原脚本初始化后恢复最后同步的页面状态，同时保留原有按钮交互。</li>
+              </ul>
+            </article>
+            <article class="release-entry">
+              <div class="release-meta"><strong>v1.7.1</strong><time datetime="2026-08-19">2026-08-19</time></div>
               <h3>L4TF 首页显示修复</h3>
               <ul>
                 <li>修复未载入 HTML 时欢迎画布仍为白色的问题，节能模式现在覆盖整个工作区。</li>

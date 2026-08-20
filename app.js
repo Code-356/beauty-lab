@@ -17,7 +17,9 @@
     workspace: $(".workspace"),
     openFileButton: $("#open-file-button"),
     pasteCodeButton: $("#paste-code-button"),
-    previewButton: $("#preview-button"),
+    modeSwitch: $("#mode-switch"),
+    editModeButton: $("#edit-mode-button"),
+    previewModeButton: $("#preview-mode-button"),
     saveButton: $("#save-button"),
     exportButton: $("#export-button"),
     printButton: $("#print-button"),
@@ -48,12 +50,12 @@
     pasteInput: $("#paste-input"),
     pasteError: $("#paste-error"),
     importPastedCode: $("#import-pasted-code"),
-    previewDialog: $("#preview-dialog"),
+    interactivePreview: $("#interactive-preview"),
     previewFrame: $("#preview-frame"),
-    closePreviewButton: $("#close-preview-button"),
     refreshPreviewButton: $("#refresh-preview-button"),
-    exportFromPreviewButton: $("#export-from-preview-button"),
-    previewWarningLabel: $("#preview-warning-label"),
+    previewStatusText: $("#preview-status-text"),
+    retryPreviewSyncButton: $("#retry-preview-sync-button"),
+    discardPreviewButton: $("#discard-preview-button"),
     printFrame: $("#print-frame"),
     documentNameButton: $("#document-name-button"),
     documentName: $("#document-name"),
@@ -63,6 +65,10 @@
     selectedComponentName: $("#selected-component-name"),
     selectionPath: $("#selection-path span"),
     noSelection: $("#no-selection"),
+    textTools: $("#text-tools"),
+    textContentList: $("#text-content-list"),
+    textContentCount: $("#text-content-count"),
+    textContentNote: $("#text-content-note"),
     selectTools: $("#select-tools"),
     selectToolsTitle: $("#select-tools-title"),
     selectToolsDescription: $("#select-tools-description"),
@@ -110,13 +116,23 @@
     pendingImageInsertionComponent: null,
     modifiedSelectIds: new Set(),
     userGuideBlobUrl: null,
+    mode: "edit",
+    previewToken: "",
+    previewInteracted: false,
+    previewReady: false,
+    previewSyncing: false,
+    previewEntrySnapshot: null,
+    previewHistory: [],
+    previewHistoryIndex: -1,
+    applyingPreviewHistory: false,
   };
   const htmlPickerTypes = [{
     description: "HTML 文件",
     accept: { "text/html": [".html", ".htm"] },
   }];
   const preparedCanvasDocuments = new WeakSet();
-  const preparedCanvasElements = new WeakSet();
+  const preparedCanvasElements = new WeakMap();
+  const pendingTextCommits = new Set();
   let hoveredCanvasComponent = null;
   let selectHoverTimer = null;
 
@@ -561,7 +577,7 @@
   function setDocumentAvailability(available) {
     ui.appShell.classList.toggle("no-document", !available);
     ui.emptyState.hidden = available;
-    [ui.previewButton, ui.exportButton, ui.printButton, ui.warningsButton, ui.insertImageButton, ui.toggleLayersButton].forEach((button) => {
+    [ui.editModeButton, ui.previewModeButton, ui.exportButton, ui.printButton, ui.warningsButton, ui.insertImageButton, ui.toggleLayersButton].forEach((button) => {
       button.disabled = !available;
     });
     updateSaveButton();
@@ -574,7 +590,7 @@
     ui.documentName.textContent = "尚未打开 HTML";
     ui.warningSummary.textContent = "等待载入";
     ui.warningCount.textContent = "0";
-    ui.previewWarningLabel.textContent = "请先载入 HTML";
+    ui.previewStatusText.textContent = "请先载入 HTML";
   }
 
   function updateUndoRedo() {
@@ -584,17 +600,98 @@
       return;
     }
     const undoManager = editor.UndoManager;
-    ui.undoButton.disabled = !undoManager.hasUndo();
-    ui.redoButton.disabled = !undoManager.hasRedo();
+    const current = captureEditorState();
+    const previewUndo = state.previewHistory[state.previewHistoryIndex];
+    const previewRedo = state.previewHistory[state.previewHistoryIndex + 1];
+    const canPreviewUndo = Boolean(previewUndo && editableStateSignature(current) === previewUndo.afterSignature && undoManager.getPointer() === previewUndo.nativePointer);
+    const canPreviewRedo = Boolean(previewRedo && editableStateSignature(current) === previewRedo.beforeSignature && undoManager.getPointer() === previewRedo.nativePointer);
+    ui.undoButton.disabled = !undoManager.hasUndo() && !canPreviewUndo;
+    ui.redoButton.disabled = !undoManager.hasRedo() && !canPreviewRedo;
   }
 
   function editorHistorySnapshot() {
     return `${editor.getHtml()}\n<style>${editor.getCss({ avoidProtected: true })}</style>`;
   }
 
+  function captureEditorState() {
+    if (!editor || !state.document) return null;
+    return {
+      html: editor.getHtml(),
+      css: editor.getCss({ avoidProtected: true }),
+      bodyAttributes: { ...editor.DomComponents.getWrapper().getAttributes() },
+      runtimeCss: state.document.runtimeCss || "",
+      runtimeRestore: state.document.runtimeRestore ? JSON.parse(JSON.stringify(state.document.runtimeRestore)) : null,
+      modifiedSelectIds: Array.from(state.modifiedSelectIds),
+      dirty: state.dirty,
+    };
+  }
+
+  function editableStateSignature(snapshot) {
+    if (!snapshot) return "";
+    return JSON.stringify({
+      html: snapshot.html,
+      css: snapshot.css,
+      bodyAttributes: snapshot.bodyAttributes,
+      runtimeCss: snapshot.runtimeCss,
+      runtimeRestore: snapshot.runtimeRestore,
+      modifiedSelectIds: snapshot.modifiedSelectIds,
+    });
+  }
+
+  function applyEditorState(snapshot) {
+    if (!snapshot || !editor || !state.document) return;
+    state.loading = true;
+    state.applyingPreviewHistory = true;
+    editor.UndoManager.skip(() => {
+      editor.select(null);
+      editor.setComponents(snapshot.html);
+      editor.setStyle(snapshot.css);
+      applyBodyAttributes(snapshot.bodyAttributes);
+    });
+    state.document = {
+      ...state.document,
+      bodyAttributes: { ...snapshot.bodyAttributes },
+      runtimeCss: snapshot.runtimeCss || "",
+      runtimeRestore: snapshot.runtimeRestore ? JSON.parse(JSON.stringify(snapshot.runtimeRestore)) : null,
+    };
+    state.modifiedSelectIds = new Set(snapshot.modifiedSelectIds || []);
+    injectRawCanvasCss([state.document.css, state.document.runtimeCss].filter(Boolean).join("\n\n"));
+    injectCanvasStylesheetLinks(state.document.stylesheetLinks, state.document.baseHref);
+    setDirty(Boolean(snapshot.dirty));
+    updateSelectionUI();
+    editor.clearDirtyCount?.();
+    editor.refresh();
+    window.setTimeout(() => {
+      editor.clearDirtyCount?.();
+      setDirty(Boolean(snapshot.dirty));
+      state.loading = false;
+      state.applyingPreviewHistory = false;
+      installCanvasSafety();
+      updateUndoRedo();
+    }, 400);
+  }
+
   function runHistoryAction(direction) {
     if (!editor) return;
     const undoManager = editor.UndoManager;
+    const current = captureEditorState();
+    if (direction === "undo") {
+      const entry = state.previewHistory[state.previewHistoryIndex];
+      if (entry && editableStateSignature(current) === entry.afterSignature && undoManager.getPointer() === entry.nativePointer) {
+        state.previewHistoryIndex -= 1;
+        applyEditorState(entry.before);
+        showToast("已撤销整次预览同步");
+        return;
+      }
+    } else {
+      const entry = state.previewHistory[state.previewHistoryIndex + 1];
+      if (entry && editableStateSignature(current) === entry.beforeSignature && undoManager.getPointer() === entry.nativePointer) {
+        state.previewHistoryIndex += 1;
+        applyEditorState(entry.after);
+        showToast("已恢复整次预览同步");
+        return;
+      }
+    }
     const isAvailable = direction === "undo" ? "hasUndo" : "hasRedo";
     let attempts = 0;
     let before = editorHistorySnapshot();
@@ -631,6 +728,12 @@
       ul: "列表",
       ol: "编号列表",
       li: "列表项",
+      button: "按钮",
+      label: "标签",
+      summary: "折叠标题",
+      figcaption: "图注",
+      td: "表格单元格",
+      th: "表头单元格",
       select: "下拉框",
       option: "下拉选项",
       table: "表格",
@@ -652,15 +755,217 @@
     return parts.join("  ›  ");
   }
 
-  function isTextLike(component) {
-    if (!component) return false;
-    const tag = (component.get("tagName") || "").toLowerCase();
-    const type = component.get("type");
-    return type === "text" || ["p", "span", "h1", "h2", "h3", "h4", "h5", "h6", "li", "a", "strong", "em", "blockquote"].includes(tag);
-  }
-
   function componentTagName(component) {
     return (component?.get?.("tagName") || "").toLowerCase();
+  }
+
+  const textExcludedTags = new Set([
+    "script", "style", "template", "noscript",
+    "img", "picture", "canvas", "svg", "path", "object", "embed", "iframe",
+    "select", "option",
+  ]);
+  const valueTextInputTypes = new Set([
+    "button", "submit", "reset", "text", "search", "email", "tel", "url", "number",
+    "password", "date", "datetime-local", "month", "time", "week",
+  ]);
+
+  function decodeTextContent(value) {
+    const textarea = document.createElement("textarea");
+    textarea.innerHTML = String(value ?? "");
+    return textarea.value;
+  }
+
+  function encodeTextContent(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+  }
+
+  function textNodeValue(component) {
+    const element = component?.getEl?.();
+    if (element?.nodeType === 3) return element.nodeValue || "";
+    return decodeTextContent(component?.get?.("content") || "");
+  }
+
+  function appendEditableTextEntries(component, entries) {
+    if (!component) return;
+    const tag = componentTagName(component);
+    const type = component.get?.("type");
+    const element = component.getEl?.();
+    if (textExcludedTags.has(tag)) return;
+    if (type === "textnode" || element?.nodeType === 3) {
+      if (textNodeValue(component).trim()) entries.push({ kind: "textnode", component });
+      return;
+    }
+
+    const children = component.components?.();
+    let childCount = 0;
+    const entryCountBeforeChildren = entries.length;
+    children?.forEach?.((child) => {
+      childCount += 1;
+      appendEditableTextEntries(child, entries);
+    });
+    if (entries.length === entryCountBeforeChildren && element?.nodeType === 1 && element.children.length === 0 && element.textContent?.trim()) {
+      entries.push({ kind: "element-text", component });
+    } else if (!childCount && type === "text") {
+      const content = String(component.get?.("content") || "");
+      if (decodeTextContent(content).trim()) entries.push({ kind: "content", component });
+    }
+  }
+
+  function editableTextEntries(component) {
+    if (!component || component.is?.("wrapper")) return [];
+    const tag = componentTagName(component);
+    if (textExcludedTags.has(tag)) return [];
+    const entries = [];
+    appendEditableTextEntries(component, entries);
+    const attributes = component.getAttributes?.() || {};
+
+    if (tag === "input") {
+      const type = String(attributes.type || "text").toLowerCase();
+      if (valueTextInputTypes.has(type)) {
+        const elementValue = component.getEl?.()?.value;
+        if (attributes.value !== undefined || elementValue) {
+          entries.push({ kind: "attribute", component, name: "value", label: "当前值" });
+        }
+      }
+      if (attributes.placeholder !== undefined) {
+        entries.push({ kind: "attribute", component, name: "placeholder", label: "占位文字" });
+      }
+    } else if (tag === "textarea" && attributes.placeholder !== undefined) {
+      entries.push({ kind: "attribute", component, name: "placeholder", label: "占位文字" });
+    }
+    return entries;
+  }
+
+  function editableTextValue(entry) {
+    if (entry.kind === "textnode") return textNodeValue(entry.component);
+    if (entry.kind === "content") return decodeTextContent(entry.component.get?.("content") || "");
+    if (entry.kind === "element-text") return entry.component.getEl?.()?.textContent || "";
+    const attributes = entry.component.getAttributes?.() || {};
+    if (entry.name === "value") return entry.component.getEl?.()?.value ?? attributes.value ?? "";
+    return attributes[entry.name] ?? "";
+  }
+
+  function setEditableTextValue(entry, value) {
+    if (entry.kind === "attribute") {
+      entry.component.addAttributes?.({ [entry.name]: String(value ?? "") });
+      const element = entry.component.getEl?.();
+      if (entry.name === "value" && element) element.value = String(value ?? "");
+      return;
+    }
+
+    const encoded = encodeTextContent(value);
+    if (entry.kind === "element-text") {
+      entry.component.set?.("content", encoded);
+      entry.component.view?.render?.();
+      return;
+    }
+    if (entry.kind === "content") {
+      entry.component.set?.("content", encoded);
+      entry.component.view?.render?.();
+      return;
+    }
+
+    const raw = String(entry.component.get?.("content") || "");
+    const leading = raw.match(/^\s*/)?.[0] || "";
+    const trailing = raw.match(/\s*$/)?.[0] || "";
+    entry.component.set?.("content", `${leading}${encoded}${trailing}`);
+    entry.component.view?.render?.();
+  }
+
+  function textEntryLabel(entry, index, total, component) {
+    if (entry.label) return i18n.t(entry.label);
+    if (total === 1 && componentTagName(component) === "button") return i18n.t("按钮文字");
+    return i18n.t(`文字 ${index + 1}`);
+  }
+
+  function renderTextTools(component) {
+    const entries = editableTextEntries(component);
+    ui.textTools.hidden = entries.length === 0;
+    ui.textContentCount.textContent = i18n.t(`${entries.length} 处`);
+    ui.textContentNote.hidden = entries.length < 2;
+    ui.textContentList.replaceChildren();
+    entries.forEach((entry, index) => {
+      const field = document.createElement("div");
+      field.className = "text-content-field";
+      const id = `text-content-input-${index}`;
+      const label = document.createElement("label");
+      label.htmlFor = id;
+      const labelName = document.createElement("span");
+      labelName.textContent = textEntryLabel(entry, index, entries.length, component);
+      const sourceComponent = entry.kind === "textnode" ? entry.component.parent?.() : entry.component;
+      const sourceTag = componentTagName(sourceComponent || entry.component);
+      const source = document.createElement("span");
+      source.textContent = sourceTag ? `<${sourceTag}>` : "";
+      label.append(labelName, source);
+
+      const input = document.createElement("textarea");
+      input.id = id;
+      input.className = "text-content-input";
+      input.rows = editableTextValue(entry).length > 70 || editableTextValue(entry).includes("\n") ? 3 : 1;
+      input.value = editableTextValue(entry);
+      input.dataset.textEntryIndex = String(index);
+      let commitTimer = null;
+      let committedValue = input.value;
+      const commit = (announce = false) => {
+        window.clearTimeout(commitTimer);
+        commitTimer = null;
+        pendingTextCommits.delete(commit);
+        if (input.value === committedValue) return;
+        const before = captureEditorState();
+        setEditableTextValue(entry, input.value);
+        committedValue = editableTextValue(entry);
+        input.value = committedValue;
+        const after = captureEditorState();
+        if (before && after && editableStateSignature(before) !== editableStateSignature(after)) {
+          pushPreviewHistory(before, after);
+          updateUndoRedo();
+        }
+        if (announce) showToast("文字修改已应用");
+      };
+      input.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") input.blur();
+      });
+      input.addEventListener("input", () => {
+        window.clearTimeout(commitTimer);
+        pendingTextCommits.add(commit);
+        commitTimer = window.setTimeout(() => commit(false), 180);
+      });
+      input.addEventListener("blur", () => commit(true));
+      field.append(label, input);
+      ui.textContentList.append(field);
+    });
+    return entries;
+  }
+
+  function flushPendingTextEdits() {
+    Array.from(pendingTextCommits).forEach((commit) => commit(false));
+  }
+
+  function isTextLike(component) {
+    return editableTextEntries(component).length > 0;
+  }
+
+  function closestTextBearingComponent(component) {
+    let current = component;
+    while (current && !current.is?.("wrapper")) {
+      if (isTextLike(current)) return current;
+      current = current.parent?.();
+    }
+    return null;
+  }
+
+  function focusTextContentEditor(component) {
+    renderTextTools(component);
+    window.setTimeout(() => {
+      const input = ui.textContentList.querySelector(".text-content-input");
+      if (!input) return;
+      ui.textTools.scrollIntoView({ block: "nearest" });
+      input.focus();
+      input.select();
+    }, 0);
   }
 
   function imageWidthPercent(component) {
@@ -701,6 +1006,7 @@
     ui.alignButtons.forEach((button) => (button.disabled = !textSelected));
 
     const tag = selected ? (selected.get("tagName") || "").toLowerCase() : "";
+    renderTextTools(selected);
     selectOptionsController?.update(selected);
     ui.imageTools.hidden = tag !== "img";
     if (tag === "img") updateImageControls(selected);
@@ -712,7 +1018,7 @@
     ui.warningCount.textContent = String(warnings.length);
     const risky = warnings.filter((warning) => warning.level === "warning").length;
     ui.warningSummary.textContent = risky ? `${risky} 项需要检查` : "兼容性良好";
-    ui.previewWarningLabel.textContent = risky ? `预览前请留意 ${risky} 项兼容性提示` : "未发现明显兼容性风险";
+    if (state.mode !== "preview") ui.previewStatusText.textContent = risky ? `预览前请留意 ${risky} 项兼容性提示` : "未发现明显兼容性风险";
     ui.warningsList.innerHTML = warnings
       .map(
         (warning) => `
@@ -790,10 +1096,12 @@
         resolve(result);
       };
       const receive = (event) => {
-        if (event.data?.type !== "beautylab-runtime-snapshot" || event.data?.token !== token) return;
+        if (event.source !== frame.contentWindow || event.data?.type !== "beautylab-runtime-snapshot" || event.data?.token !== token) return;
         finish({
           body: String(event.data.body || ""),
           css: String(event.data.css || ""),
+          bodyAttributes: event.data.bodyAttributes && typeof event.data.bodyAttributes === "object" ? event.data.bodyAttributes : {},
+          runtimeState: event.data.runtimeState && typeof event.data.runtimeState === "object" ? event.data.runtimeState : null,
           error: String(event.data.error || ""),
         });
       };
@@ -822,6 +1130,7 @@
             ...parsed,
             bodyHtml: snapshot.bodyHtml,
             css: [parsed.css, snapshot.css && `/* Isolated runtime snapshot styles */\n${snapshot.css}`].filter(Boolean).join("\n\n"),
+            bodyAttributes: snapshot.bodyAttributes,
             warnings: [
               ...parsed.warnings,
               {
@@ -858,7 +1167,22 @@
     injectRawCanvasCss(parsed.css);
     injectCanvasStylesheetLinks(parsed.stylesheetLinks, parsed.baseHref);
     state.document = parsed;
+    state.document.runtimeCss = "";
+    state.document.runtimeRestore = null;
     state.modifiedSelectIds.clear();
+    state.previewHistory = [];
+    state.previewHistoryIndex = -1;
+    state.previewEntrySnapshot = null;
+    state.previewInteracted = false;
+    state.previewReady = false;
+    state.mode = "edit";
+    ui.appShell.classList.remove("preview-mode");
+    ui.interactivePreview.hidden = true;
+    ui.previewFrame.srcdoc = "";
+    ui.editModeButton.classList.add("active");
+    ui.previewModeButton.classList.remove("active");
+    ui.editModeButton.setAttribute("aria-pressed", "true");
+    ui.previewModeButton.setAttribute("aria-pressed", "false");
     state.fileHandle = fileHandle;
     state.documentNameEditable = editableFileName;
     ui.documentName.textContent = parsed.fileName;
@@ -881,21 +1205,31 @@
   }
 
   function buildOutput() {
+    flushPendingTextEdits();
     if (!state.document) throw new Error("请先打开或粘贴 HTML。");
     const editedCss = editor.getCss({ avoidProtected: true });
+    const editedHtml = editor.getHtml();
+    const bodyAttributes = { ...editor.DomComponents.getWrapper().getAttributes() };
     const parser = new DOMParser();
-    const editedDocument = parser.parseFromString(`<!doctype html><html><body>${editor.getHtml()}</body></html>`, "text/html");
+    const editedDocument = parser.parseFromString(`<!doctype html><html><body>${editedHtml}</body></html>`, "text/html");
     const selectOverrides = Array.from(state.modifiedSelectIds).flatMap((id) => {
       const select = Array.from(editedDocument.querySelectorAll("select")).find(
         (candidate) => candidate.classList.contains(`${FrameEditIO.selectIdClassPrefix}${id}`),
       );
       return select ? [{ id, html: select.innerHTML, value: select.value }] : [];
     });
+    const runtimeRestore = state.document.runtimeRestore
+      ? FrameEditIO.createRuntimeRestoreState(editedHtml, bodyAttributes, state.document.runtimeRestore.interaction)
+      : null;
     return FrameEditIO.createOutputDocument(
-      state.document,
-      editor.getHtml(),
-      `${state.document.css}\n\n/* Edward's HTML Beauty Lab visual overrides */\n${editedCss}`,
-      { selectOverrides },
+      { ...state.document, bodyAttributes },
+      editedHtml,
+      [
+        state.document.css,
+        state.document.runtimeCss && `/* Captured runtime styles */\n${state.document.runtimeCss}`,
+        `/* Edward's HTML Beauty Lab visual overrides */\n${editedCss}`,
+      ].filter(Boolean).join("\n\n"),
+      { selectOverrides, runtimeRestore },
     );
   }
 
@@ -904,7 +1238,8 @@
     return original.replace(/\.html?$/i, "") + "-已编辑.html";
   }
 
-  function downloadOutput() {
+  async function downloadOutput() {
+    if (!await ensurePreviewSyncedForAction()) return;
     let html;
     try {
       html = buildOutput();
@@ -926,18 +1261,266 @@
     showToast(`已生成 ${outputFileName()}`);
   }
 
-  function refreshPreview() {
+  function newPreviewToken() {
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
+  }
+
+  function setPreviewStatus(message, { dirty = false, error = false } = {}) {
+    ui.previewStatusText.textContent = message;
+    ui.interactivePreview.classList.toggle("is-dirty", dirty);
+    ui.interactivePreview.classList.toggle("has-sync-error", error);
+  }
+
+  function setModeUi(mode) {
+    const preview = mode === "preview";
+    state.mode = mode;
+    ui.appShell.classList.toggle("preview-mode", preview);
+    ui.interactivePreview.hidden = !preview;
+    ui.editModeButton.classList.toggle("active", !preview);
+    ui.previewModeButton.classList.toggle("active", preview);
+    ui.editModeButton.setAttribute("aria-pressed", String(!preview));
+    ui.previewModeButton.setAttribute("aria-pressed", String(preview));
+    if (!preview) window.setTimeout(() => editor?.refresh(), 0);
+  }
+
+  function resetPreviewSyncFailure() {
+    ui.retryPreviewSyncButton.hidden = true;
+    ui.discardPreviewButton.hidden = true;
+    ui.modeSwitch.classList.remove("syncing");
+    ui.editModeButton.disabled = !state.document;
+    ui.previewModeButton.disabled = !state.document;
+  }
+
+  function loadInteractivePreview() {
     try {
       const output = buildOutput();
-      ui.previewFrame.srcdoc = FrameEditIO.createPreviewDocument(output);
+      state.previewToken = newPreviewToken();
+      state.previewInteracted = false;
+      state.previewReady = false;
+      resetPreviewSyncFailure();
+      setPreviewStatus("正在载入交互预览…");
+      ui.previewFrame.srcdoc = FrameEditIO.createInteractivePreviewDocument(output, state.previewToken, {
+        scriptIds: state.document.scripts.map((entry) => entry.id),
+      });
+      return true;
     } catch (error) {
       showToast(error.message, "error");
+      return false;
     }
   }
 
-  function openPreview() {
-    refreshPreview();
-    ui.previewDialog.showModal();
+  function enterPreviewMode() {
+    if (!state.document || state.mode === "preview" || state.previewSyncing) return;
+    state.previewEntrySnapshot = captureEditorState();
+    setModeUi("preview");
+    ui.documentState.textContent = "预览模式";
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (state.mode !== "preview") return;
+        if (!loadInteractivePreview()) {
+          setModeUi("edit");
+          state.previewEntrySnapshot = null;
+        }
+      });
+    });
+  }
+
+  function validPreviewMessage(event) {
+    const allowedOrigin = event.origin === "null" || event.origin === window.location.origin;
+    return allowedOrigin && event.source === ui.previewFrame.contentWindow && event.data?.token === state.previewToken;
+  }
+
+  function requestPreviewCapture() {
+    return new Promise((resolve, reject) => {
+      if (state.mode !== "preview" || !state.previewToken || !ui.previewFrame.contentWindow) {
+        reject(new Error("交互预览尚未准备好。"));
+        return;
+      }
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      let settled = false;
+      const finish = (error, result) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        window.removeEventListener("message", receive);
+        if (error) reject(error);
+        else resolve(result);
+      };
+      const receive = (event) => {
+        const message = event.data || {};
+        if (!validPreviewMessage(event) || message.type !== "beautylab-preview-capture-result" || message.requestId !== requestId) return;
+        if (message.error) {
+          finish(new Error(String(message.error)));
+          return;
+        }
+        finish(null, {
+          body: String(message.body || ""),
+          css: String(message.css || ""),
+          bodyAttributes: message.bodyAttributes && typeof message.bodyAttributes === "object" ? message.bodyAttributes : {},
+          runtimeState: message.runtimeState && typeof message.runtimeState === "object" ? message.runtimeState : null,
+          interaction: message.interaction && typeof message.interaction === "object" ? message.interaction : null,
+        });
+      };
+      const timer = window.setTimeout(() => finish(new Error("同步超过 4 秒，请重试。")), 4000);
+      window.addEventListener("message", receive);
+      ui.previewFrame.contentWindow.postMessage({
+        type: "beautylab-preview-capture-request",
+        token: state.previewToken,
+        requestId,
+      }, "*");
+    });
+  }
+
+  function closeInteractivePreview() {
+    setModeUi("edit");
+    ui.previewFrame.srcdoc = "";
+    state.previewToken = "";
+    state.previewReady = false;
+    state.previewInteracted = false;
+    state.previewEntrySnapshot = null;
+    resetPreviewSyncFailure();
+    setDirty(state.dirty);
+  }
+
+  function pushPreviewHistory(before, after) {
+    const entry = {
+      before,
+      after,
+      beforeSignature: editableStateSignature(before),
+      afterSignature: editableStateSignature(after),
+      nativePointer: editor.UndoManager.getPointer(),
+    };
+    state.previewHistory.splice(state.previewHistoryIndex + 1);
+    state.previewHistory.push(entry);
+    state.previewHistoryIndex = state.previewHistory.length - 1;
+  }
+
+  async function syncPreviewToEditor() {
+    if (state.mode !== "preview") return true;
+    if (state.previewSyncing) return false;
+    state.previewSyncing = true;
+    ui.modeSwitch.classList.add("syncing");
+    ui.editModeButton.disabled = true;
+    ui.previewModeButton.disabled = true;
+    ui.refreshPreviewButton.disabled = true;
+    ui.retryPreviewSyncButton.hidden = true;
+    ui.discardPreviewButton.hidden = true;
+    setPreviewStatus("正在同步当前预览状态…", { dirty: state.previewInteracted });
+    ui.documentState.textContent = "正在同步预览…";
+
+    const before = state.previewEntrySnapshot || captureEditorState();
+    try {
+      const result = await requestPreviewCapture();
+      if (!result.body.trim()) throw new Error("预览没有返回可编辑页面内容。");
+      const merged = FrameEditIO.mergeRuntimeSnapshot(state.document, result);
+      if (!merged.snapshotApplied) throw new Error("无法把当前预览转换为可编辑页面。");
+      const capturedRuntimeCss = String(merged.css || "").trim();
+      const nextRuntimeCss = capturedRuntimeCss && !state.document.css.includes(capturedRuntimeCss)
+        ? capturedRuntimeCss
+        : before.runtimeCss;
+
+      state.loading = true;
+      editor.UndoManager.skip(() => {
+        editor.select(null);
+        editor.setComponents(merged.bodyHtml);
+        editor.setStyle(before.css);
+        applyBodyAttributes(merged.bodyAttributes);
+      });
+      state.document = {
+        ...state.document,
+        bodyAttributes: { ...merged.bodyAttributes },
+        runtimeCss: nextRuntimeCss || "",
+        runtimeRestore: merged.runtimeState ? { ...merged.runtimeState, interaction: result.interaction || merged.runtimeState.interaction || null } : null,
+      };
+      injectRawCanvasCss([state.document.css, state.document.runtimeCss].filter(Boolean).join("\n\n"));
+      injectCanvasStylesheetLinks(state.document.stylesheetLinks, state.document.baseHref);
+      const afterBeforeDirty = captureEditorState();
+      const changed = JSON.stringify({
+        html: before.html,
+        css: before.css,
+        bodyAttributes: before.bodyAttributes,
+        runtimeCss: before.runtimeCss,
+      }) !== JSON.stringify({
+        html: afterBeforeDirty.html,
+        css: afterBeforeDirty.css,
+        bodyAttributes: afterBeforeDirty.bodyAttributes,
+        runtimeCss: afterBeforeDirty.runtimeCss,
+      });
+
+      if (changed) {
+        setDirty(true);
+        const after = captureEditorState();
+        pushPreviewHistory(before, after);
+        showToast("预览状态已同步，可继续修改当前页面");
+      } else {
+        state.document.runtimeRestore = before.runtimeRestore;
+        state.document.runtimeCss = before.runtimeCss;
+        setDirty(before.dirty);
+        showToast("预览状态未发生变化");
+      }
+      editor.clearDirtyCount?.();
+      updateSelectionUI();
+      updateUndoRedo();
+      closeInteractivePreview();
+      installCanvasSafety();
+      window.setTimeout(() => {
+        editor.clearDirtyCount?.();
+        state.loading = false;
+        setDirty(changed ? true : before.dirty);
+        installCanvasSafety();
+        updateUndoRedo();
+      }, 400);
+      return true;
+    } catch (error) {
+      if (before) applyEditorState(before);
+      state.previewSyncing = false;
+      ui.modeSwitch.classList.remove("syncing");
+      ui.previewModeButton.disabled = false;
+      ui.editModeButton.disabled = false;
+      ui.refreshPreviewButton.disabled = false;
+      ui.retryPreviewSyncButton.hidden = false;
+      ui.discardPreviewButton.hidden = false;
+      setPreviewStatus(error.message || "预览同步失败，请重试。", { dirty: state.previewInteracted, error: true });
+      ui.documentState.textContent = "预览同步失败";
+      showToast(error.message || "预览同步失败。", "error");
+      return false;
+    } finally {
+      if (state.mode !== "preview") {
+        state.previewSyncing = false;
+        ui.refreshPreviewButton.disabled = false;
+      }
+    }
+  }
+
+  function discardPreviewChanges() {
+    if (state.previewSyncing) return;
+    closeInteractivePreview();
+    showToast("已放弃本轮预览变化", "warning");
+  }
+
+  function reloadInteractivePreview() {
+    ui.documentState.textContent = "预览模式";
+    ui.previewFrame.srcdoc = "";
+    window.requestAnimationFrame(() => {
+      if (state.mode === "preview") loadInteractivePreview();
+    });
+  }
+
+  function refreshPreview() {
+    if (!state.previewInteracted) {
+      reloadInteractivePreview();
+      return;
+    }
+    withDirtyConfirmation(
+      reloadInteractivePreview,
+      "重新载入预览？",
+      "本轮尚未同步的点击、输入和选择变化将被放弃。",
+      true,
+    );
+  }
+
+  async function ensurePreviewSyncedForAction() {
+    return state.mode === "preview" ? syncPreviewToEditor() : true;
   }
 
   function openWarnings(forExport = false) {
@@ -945,7 +1528,8 @@
     ui.warningsDialog.showModal();
   }
 
-  function printOutput() {
+  async function printOutput() {
+    if (!await ensurePreviewSyncedForAction()) return;
     try {
       const output = buildOutput();
       ui.printFrame.hidden = false;
@@ -956,8 +1540,8 @@
     }
   }
 
-  function withDirtyConfirmation(action, title = "放弃未导出的修改？", message = "继续操作会清空当前修改。") {
-    if (!state.dirty) {
+  function withDirtyConfirmation(action, title = "放弃未导出的修改？", message = "继续操作会清空当前修改。", force = false) {
+    if (!state.dirty && !force) {
       action();
       return;
     }
@@ -1007,6 +1591,7 @@
   }
 
   async function saveCurrentDocument() {
+    if (!await ensurePreviewSyncedForAction()) return;
     let html;
     try {
       html = buildOutput();
@@ -1204,8 +1789,8 @@
 
   function installComponentSelection(component) {
     const element = component?.getEl?.();
-    if (!element || preparedCanvasElements.has(element)) return;
-    preparedCanvasElements.add(element);
+    if (!element || preparedCanvasElements.get(element) === component) return;
+    preparedCanvasElements.set(element, component);
     const selectComponent = (event) => {
       if (typeof event.button === "number" && event.button !== 0) return;
       window.setTimeout(() => {
@@ -1261,15 +1846,19 @@
       if (anchor) event.preventDefault();
     });
     frameDocument.addEventListener("dblclick", (event) => {
-      const component = getCanvasComponent(event.target);
-      if (!component) return;
-      editor.select(component);
+      const selectedComponent = getCanvasComponent(event.target);
+      if (!selectedComponent) return;
       if (event.target?.tagName === "IMG") {
+        editor.select(selectedComponent);
         window.setTimeout(() => ui.imageFileInput.click(), 0);
         return;
       }
-      if (isTextLike(component) && component.getEl()?.contentEditable !== "true") {
-        component.view?.onActive?.(event);
+      const component = closestTextBearingComponent(selectedComponent) || selectedComponent;
+      editor.select(component);
+      if (!isTextLike(component)) return;
+      if (component.getEl()?.contentEditable !== "true") component.view?.onActive?.(event);
+      if (editor.getEditing?.() !== component && component.getEl()?.contentEditable !== "true") {
+        focusTextContentEditor(component);
       }
     }, true);
   }
@@ -1307,19 +1896,25 @@
     });
   }
 
-  ui.openFileButton.addEventListener("click", () => withDirtyConfirmation(openHtmlFile, "打开其他 HTML？", "当前未保存的修改将被清空。"));
+  ui.openFileButton.addEventListener("click", async () => {
+    if (!await ensurePreviewSyncedForAction()) return;
+    withDirtyConfirmation(openHtmlFile, "打开其他 HTML？", "当前未保存的修改将被清空。");
+  });
   ui.emptyOpenFileButton.addEventListener("click", () => ui.openFileButton.click());
   ui.fileInput.addEventListener("change", () => {
     const [file] = ui.fileInput.files;
     loadFile(file);
     ui.fileInput.value = "";
   });
-  ui.pasteCodeButton.addEventListener("click", () => withDirtyConfirmation(() => {
+  ui.pasteCodeButton.addEventListener("click", async () => {
+    if (!await ensurePreviewSyncedForAction()) return;
+    withDirtyConfirmation(() => {
     ui.pasteInput.value = "";
     ui.pasteError.hidden = true;
     ui.pasteDialog.showModal();
     window.setTimeout(() => ui.pasteInput.focus(), 0);
-  }, "粘贴新的 HTML？", "载入新代码会清空当前未保存的修改。"));
+    }, "粘贴新的 HTML？", "载入新代码会清空当前未保存的修改。");
+  });
   ui.emptyPasteCodeButton.addEventListener("click", () => ui.pasteCodeButton.click());
   ui.importPastedCode.addEventListener("click", async () => {
     ui.importPastedCode.disabled = true;
@@ -1334,7 +1929,8 @@
     }
   });
 
-  ui.previewButton.addEventListener("click", openPreview);
+  ui.previewModeButton.addEventListener("click", enterPreviewMode);
+  ui.editModeButton.addEventListener("click", syncPreviewToEditor);
   ui.documentNameButton.addEventListener("click", startDocumentNameEdit);
   ui.documentNameInput.addEventListener("blur", () => finishDocumentNameEdit(true));
   ui.documentNameInput.addEventListener("keydown", (event) => {
@@ -1349,18 +1945,18 @@
     }
   });
   ui.saveButton.addEventListener("click", saveCurrentDocument);
-  ui.exportButton.addEventListener("click", () => openWarnings(true));
-  ui.printButton.addEventListener("click", () => {
+  ui.exportButton.addEventListener("click", async () => {
+    if (!await ensurePreviewSyncedForAction()) return;
+    openWarnings(true);
+  });
+  ui.printButton.addEventListener("click", async () => {
     setMoreMenuOpen(false);
-    printOutput();
+    await printOutput();
   });
   ui.userGuideButton.addEventListener("click", openUserGuide);
-  ui.closePreviewButton.addEventListener("click", () => {
-    ui.previewFrame.srcdoc = "";
-    ui.previewDialog.close();
-  });
   ui.refreshPreviewButton.addEventListener("click", refreshPreview);
-  ui.exportFromPreviewButton.addEventListener("click", downloadOutput);
+  ui.retryPreviewSyncButton.addEventListener("click", syncPreviewToEditor);
+  ui.discardPreviewButton.addEventListener("click", discardPreviewChanges);
   ui.undoButton.addEventListener("click", () => runHistoryAction("undo"));
   ui.redoButton.addEventListener("click", () => runHistoryAction("redo"));
   ui.duplicateButton.addEventListener("click", () => {
@@ -1437,9 +2033,9 @@
 
   ui.warningsButton.addEventListener("click", () => openWarnings(false));
   ui.closeWarningsButton.addEventListener("click", () => ui.warningsDialog.close());
-  ui.continueExportButton.addEventListener("click", () => {
+  ui.continueExportButton.addEventListener("click", async () => {
     ui.warningsDialog.close();
-    downloadOutput();
+    await downloadOutput();
   });
   ui.confirmCancelButton.addEventListener("click", () => {
     state.pendingAction = null;
@@ -1477,9 +2073,30 @@
     syncDocumentNameControl();
     setDirty(state.dirty);
     updateSaveButton();
+    if (editor) updateSelectionUI();
   });
   ui.ecoButton.addEventListener("click", () => {
     applyEcoMode(!ui.appShell.classList.contains("eco-mode"));
+  });
+
+  window.addEventListener("message", (event) => {
+    if (state.mode !== "preview" || !validPreviewMessage(event)) return;
+    const message = event.data || {};
+    if (message.type === "beautylab-preview-ready") {
+      state.previewReady = true;
+      if (!state.previewInteracted && !state.previewSyncing) {
+        const risky = state.document?.warnings?.filter((warning) => warning.level === "warning").length || 0;
+        setPreviewStatus(risky ? `预览已就绪，请留意 ${risky} 项兼容性提示` : "交互预览已就绪，可点击页面按钮");
+      }
+      return;
+    }
+    if (message.type === "beautylab-preview-interaction") {
+      state.previewInteracted = true;
+      if (!state.previewSyncing) {
+        setPreviewStatus("预览中有尚未同步的交互变化", { dirty: true });
+        ui.documentState.textContent = "预览变化待同步";
+      }
+    }
   });
 
   window.addEventListener("dragenter", (event) => {
@@ -1494,7 +2111,7 @@
     state.dragDepth = Math.max(0, state.dragDepth - 1);
     if (!state.dragDepth) ui.dropOverlay.hidden = true;
   });
-  window.addEventListener("drop", (event) => {
+  window.addEventListener("drop", async (event) => {
     event.preventDefault();
     state.dragDepth = 0;
     ui.dropOverlay.hidden = true;
@@ -1503,6 +2120,7 @@
       showToast("拖入的文件中没有 HTML。", "warning");
       return;
     }
+    if (!await ensurePreviewSyncedForAction()) return;
     withDirtyConfirmation(() => loadFile(file), "打开拖入的 HTML？", "当前未保存的修改将被清空。");
   });
 
@@ -1535,7 +2153,7 @@
   });
 
   window.addEventListener("beforeunload", (event) => {
-    if (!state.dirty) return;
+    if (!state.dirty && !state.previewInteracted) return;
     event.preventDefault();
     event.returnValue = "";
   });

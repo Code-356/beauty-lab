@@ -275,6 +275,57 @@ button {
   height: 14px;
 }
 
+.mode-switch {
+  height: 30px;
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(48px, auto));
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #eceeeb;
+}
+
+.mode-switch-button {
+  min-width: 0;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  border-radius: 3px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.mode-switch-button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.mode-switch-button.active {
+  color: var(--ink);
+  background: var(--panel-strong);
+  box-shadow: 0 1px 3px rgba(31, 35, 30, 0.12);
+}
+
+.mode-switch-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 65%, white);
+  outline-offset: 1px;
+}
+
+.mode-switch-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.mode-switch.syncing .mode-switch-button {
+  cursor: wait;
+}
+
 .utility-text-button {
   height: 30px;
   min-width: 40px;
@@ -594,6 +645,99 @@ textarea:focus-visible {
   grid-template-columns: 0 minmax(360px, 1fr) var(--right-width);
 }
 
+.app-shell.preview-mode {
+  grid-template-rows: var(--toolbar-height) 0 minmax(0, 1fr);
+}
+
+.app-shell.preview-mode .toolstrip {
+  min-height: 0;
+  overflow: hidden;
+  padding-block: 0;
+  border-bottom: 0;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.app-shell.preview-mode .workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.app-shell.preview-mode .left-sidebar,
+.app-shell.preview-mode .canvas-column,
+.app-shell.preview-mode .right-sidebar {
+  display: none;
+}
+
+.interactive-preview {
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: 38px minmax(0, 1fr);
+  background: #111311;
+}
+
+.interactive-preview:not([hidden]) {
+  display: grid;
+}
+
+.interactive-preview-bar {
+  min-width: 0;
+  padding: 0 10px 0 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  font-size: 10px;
+}
+
+.interactive-preview-status,
+.interactive-preview-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.interactive-preview-status span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.interactive-preview-status svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--success);
+}
+
+.interactive-preview.is-dirty .interactive-preview-status svg,
+.interactive-preview.has-sync-error .interactive-preview-status svg {
+  color: var(--warning);
+}
+
+.interactive-preview-actions .button {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 10px;
+}
+
+.interactive-preview-actions .icon-button {
+  width: 28px;
+  height: 28px;
+}
+
+#preview-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #ffffff;
+}
+
 .app-shell.no-document .workspace {
   grid-template-columns: 0 minmax(360px, 1fr) 0;
 }
@@ -790,6 +934,72 @@ textarea:focus-visible {
 }
 
 .context-panel-copy span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.text-content-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.text-content-header .context-panel-copy {
+  min-width: 0;
+  margin-bottom: 8px;
+}
+
+.text-content-list {
+  display: grid;
+  gap: 8px;
+}
+
+.text-content-field {
+  display: grid;
+  gap: 4px;
+}
+
+.text-content-field label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #454943;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.text-content-field label span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-content-input {
+  width: 100%;
+  min-height: 34px;
+  resize: vertical;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  font: 500 11px/1.45 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+}
+
+.text-content-input:focus {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  outline-offset: 0;
+}
+
+.text-content-note {
+  margin: 8px 0 0;
   color: var(--muted);
   font-size: 10px;
   line-height: 1.45;
@@ -1290,6 +1500,19 @@ textarea:focus-visible {
   background: #16351f;
 }
 
+.app-shell.eco-mode .mode-switch,
+.app-shell.eco-mode .interactive-preview-bar {
+  color: var(--muted);
+  background: #111211;
+  border-color: var(--line);
+}
+
+.app-shell.eco-mode .mode-switch-button.active {
+  color: #f1f3ef;
+  background: #282b27;
+  box-shadow: none;
+}
+
 @media (max-width: 1160px) {
   .topbar {
     grid-template-columns: minmax(190px, 1fr) minmax(130px, auto) minmax(520px, 1fr);
@@ -1305,6 +1528,78 @@ textarea:focus-visible {
   }
 
   .top-actions > .button span {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  :root {
+    --toolbar-height: 84px;
+  }
+
+  body {
+    min-width: 0;
+  }
+
+  .topbar {
+    grid-template-columns: minmax(118px, auto) minmax(0, 1fr);
+    grid-template-rows: 42px 42px;
+    gap: 0 8px;
+    padding: 0 8px;
+  }
+
+  .brand-copy strong {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 11px;
+  }
+
+  .document-meta {
+    justify-content: flex-end;
+  }
+
+  .document-state {
+    display: none;
+  }
+
+  #document-name {
+    max-width: 120px;
+  }
+
+  .top-actions {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-content: space-between;
+    gap: 2px;
+  }
+
+  .top-actions .toolbar-divider {
+    display: none;
+  }
+
+  .mode-switch {
+    grid-template-columns: repeat(2, minmax(38px, 1fr));
+  }
+
+  .mode-switch-button {
+    padding-inline: 4px;
+  }
+
+  .utility-text-button {
+    min-width: 30px;
+    padding-inline: 5px;
+  }
+
+  .eco-button span {
+    display: none;
+  }
+
+  .interactive-preview-bar {
+    padding-inline: 8px;
+  }
+
+  .interactive-preview-actions .button span {
     display: none;
   }
 }

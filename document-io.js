@@ -9,6 +9,7 @@
   ];
   const INLINE_STYLE_CLASS_PREFIX = "beautylab-inline-style-";
   const SELECT_ID_CLASS_PREFIX = "beautylab-select-id-";
+  const RUNTIME_ID_ATTRIBUTE = "data-beautylab-runtime-id";
 
   function attributesToRecord(element) {
     return Object.fromEntries(Array.from(element.attributes, (attribute) => [attribute.name, attribute.value]));
@@ -58,6 +59,19 @@
     Array.from(documentNode.querySelectorAll("select")).forEach((select, index) => {
       const hasIdClass = Array.from(select.classList).some((className) => className.startsWith(SELECT_ID_CLASS_PREFIX));
       if (!hasIdClass) select.classList.add(`${SELECT_ID_CLASS_PREFIX}select-${index}`);
+    });
+  }
+
+  function assignRuntimeIds(documentNode) {
+    const used = new Set(Array.from(documentNode.querySelectorAll(`[${RUNTIME_ID_ATTRIBUTE}]`), (element) => element.getAttribute(RUNTIME_ID_ATTRIBUTE)));
+    let nextId = 1;
+    Array.from(documentNode.body?.querySelectorAll("*") || []).forEach((element) => {
+      if (element.id || element.hasAttribute(RUNTIME_ID_ATTRIBUTE) || element.matches("script, style, template[data-frameedit-script-id]")) return;
+      let id;
+      do id = `runtime-${nextId++}`;
+      while (used.has(id));
+      used.add(id);
+      element.setAttribute(RUNTIME_ID_ATTRIBUTE, id);
     });
   }
 
@@ -134,6 +148,7 @@
 
     const { inlineHandlerCount, javascriptLinkCount, activeEmbedCount } = disableActiveContent(documentNode);
     assignSelectIds(documentNode);
+    assignRuntimeIds(documentNode);
     const inlineCss = normalizeInlineStyles(documentNode);
     const css = [sourceCss, inlineCss && `/* Preserved inline styles */\n${inlineCss}`].filter(Boolean).join("\n\n");
 
@@ -258,6 +273,7 @@
   }
 
   function createOutputDocument(state, bodyHtml, css) {
+    const options = arguments[3] || {};
     const parser = new DOMParser();
     const skeleton = `${state.originalDoctype || "<!doctype html>"}<html><head></head><body></body></html>`;
     const documentNode = parser.parseFromString(skeleton, "text/html");
@@ -265,6 +281,7 @@
     applyAttributes(documentNode.body, state.bodyAttributes);
     documentNode.head.innerHTML = state.headHtml || "";
     documentNode.body.innerHTML = bodyHtml || "";
+    documentNode.querySelectorAll("script[data-beautylab-preview-bridge], script[data-beautylab-snapshot-reporter], script[data-beautylab-runtime-restore]").forEach((node) => node.remove());
 
     documentNode.head.querySelector('style[data-frameedit-styles]')?.remove();
     if (css && css.trim()) {
@@ -299,11 +316,16 @@
     if (missingScripts.length) {
       output = output.replace("</body>", `${missingScripts.map((entry) => entry.html).join("\n")}\n</body>`);
     }
-    const selectOverrides = arguments[3]?.selectOverrides || [];
+    const selectOverrides = options.selectOverrides || [];
     if (selectOverrides.length) {
       const safeOverrides = JSON.stringify(selectOverrides).replaceAll("<", "\\u003c");
       const overrideScript = `<script data-beautylab-select-overrides>\n(function () {\n  var overrides = ${safeOverrides};\n  overrides.forEach(function (config) {\n    var className = ${JSON.stringify(SELECT_ID_CLASS_PREFIX)} + config.id;\n    var select = Array.prototype.find.call(document.querySelectorAll('select'), function (candidate) { return candidate.classList.contains(className); });\n    if (!select) return;\n    select.innerHTML = config.html;\n    if (config.value != null) select.value = config.value;\n    select.dispatchEvent(new Event('change', { bubbles: true }));\n  });\n})();\n<\/script>`;
       output = output.replace("</body>", `${overrideScript}\n</body>`);
+    }
+    if (options.runtimeRestore?.records?.length) {
+      const safeState = JSON.stringify(options.runtimeRestore).replaceAll("<", "\\u003c");
+      const restoreScript = `<script data-beautylab-runtime-restore>\n(function () {\n  var state = ${safeState};\n  function find(record) {\n    if (record.id) return document.getElementById(record.id);\n    if (!record.runtimeId) return null;\n    var nodes = document.querySelectorAll('[${RUNTIME_ID_ATTRIBUTE}]');\n    for (var i = 0; i < nodes.length; i += 1) {\n      if (nodes[i].getAttribute('${RUNTIME_ID_ATTRIBUTE}') === record.runtimeId) return nodes[i];\n    }\n    return null;\n  }\n  function restoreAttributes(element, record) {\n    ['class', 'style'].forEach(function (name) {\n      var value = record.attributes[name];\n      if (value == null) element.removeAttribute(name);\n      else element.setAttribute(name, value);\n    });\n    Array.from(element.attributes).forEach(function (attribute) {\n      var name = attribute.name.toLowerCase();\n      if (name.indexOf('aria-') === 0 || (name.indexOf('data-') === 0 && name !== '${RUNTIME_ID_ATTRIBUTE}')) element.removeAttribute(attribute.name);\n    });\n    Object.keys(record.attributes || {}).forEach(function (name) {\n      if (name === 'class' || name === 'style' || record.attributes[name] == null) return;\n      element.setAttribute(name, record.attributes[name]);\n    });\n    element.toggleAttribute('hidden', Boolean(record.hidden));\n    if ('open' in element) element.open = Boolean(record.open);\n    else element.toggleAttribute('open', Boolean(record.open));\n  }\n  function apply() {\n    if (state.bodyAttributes) {\n      Array.from(document.body.attributes).forEach(function (attribute) {\n        if (attribute.name !== '${RUNTIME_ID_ATTRIBUTE}') document.body.removeAttribute(attribute.name);\n      });\n      Object.keys(state.bodyAttributes).forEach(function (name) { document.body.setAttribute(name, state.bodyAttributes[name]); });\n    }\n    (state.records || []).forEach(function (record) {\n      var element = find(record);\n      if (!element) return;\n      restoreAttributes(element, record);\n      if (record.text != null && !element.children.length) element.textContent = record.text;\n      if (record.value != null && 'value' in element) element.value = record.value;\n      if (record.checked != null && 'checked' in element) element.checked = Boolean(record.checked);\n      if (Array.isArray(record.selectedValues) && element.options) {\n        Array.from(element.options).forEach(function (option) { option.selected = record.selectedValues.indexOf(option.value) !== -1; });\n      }\n    });\n    if (state.interaction) {\n      try { window.scrollTo(Number(state.interaction.scrollX) || 0, Number(state.interaction.scrollY) || 0); } catch (_) {}\n    }\n  }\n  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', apply, { once: true });\n  else apply();\n  window.addEventListener('load', apply, { once: true });\n  setTimeout(apply, 120);\n  setTimeout(apply, 700);\n})();\n<\/script>`;
+      output = output.replace("</body>", `${restoreScript}\n</body>`);
     }
     return output;
   }
@@ -312,9 +334,20 @@
     const parser = new DOMParser();
     const snapshot = typeof runtimeSnapshot === "string" ? { body: runtimeSnapshot, css: "" } : (runtimeSnapshot || {});
     const runtimeDocument = parser.parseFromString(`<!doctype html><html><body>${snapshot.body || ""}</body></html>`, "text/html");
-    runtimeDocument.querySelectorAll("script, template[data-frameedit-script-id]").forEach((node) => node.remove());
+    runtimeDocument.querySelectorAll("script").forEach((script) => {
+      const id = script.getAttribute("data-frameedit-script-id");
+      if (!id) {
+        script.remove();
+        return;
+      }
+      const placeholder = runtimeDocument.createElement("template");
+      placeholder.setAttribute("data-frameedit-script-id", id);
+      script.replaceWith(placeholder);
+    });
+    runtimeDocument.querySelectorAll("script[data-beautylab-preview-bridge], script[data-beautylab-snapshot-reporter]").forEach((node) => node.remove());
     disableActiveContent(runtimeDocument);
     assignSelectIds(runtimeDocument);
+    assignRuntimeIds(runtimeDocument);
     const runtimeInlineCss = normalizeInlineStyles(runtimeDocument, "beautylab-runtime-style-");
     const runtimeCss = [snapshot.css, runtimeInlineCss].filter((value) => String(value || "").trim()).join("\n\n");
     const bodyHtml = runtimeDocument.body.innerHTML;
@@ -322,69 +355,197 @@
     return {
       bodyHtml: bodyHtml || state.bodyHtml,
       css: runtimeCss,
+      bodyAttributes: snapshot.bodyAttributes || state.bodyAttributes,
+      runtimeState: snapshot.runtimeState || null,
       mergedRegions: runtimeDocument.body.querySelectorAll("*").length,
       mergedSelects: runtimeDocument.body.querySelectorAll("select").length,
       snapshotApplied: Boolean(bodyHtml.trim()),
     };
   }
 
-  function createRuntimeSnapshotDocument(state, token) {
-    const output = createOutputDocument(state, state.bodyHtml, state.css);
-    const parser = new DOMParser();
-    const documentNode = parser.parseFromString(createPreviewDocument(output), "text/html");
-    const reporter = documentNode.createElement("script");
-    reporter.setAttribute("data-beautylab-snapshot-reporter", "");
-    reporter.textContent = `(function () {
-      var sent = false;
-      function syncFormState() {
-        Array.from(document.querySelectorAll("input")).forEach(function (input) {
-          if (input.type === "checkbox" || input.type === "radio") input.toggleAttribute("checked", input.checked);
-          else if (input.type !== "file") input.setAttribute("value", input.value);
+  function markOriginalScripts(documentNode, scriptIds = []) {
+    const candidates = Array.from(documentNode.querySelectorAll("script")).filter((script) => !script.matches("[data-beautylab-select-overrides], [data-beautylab-runtime-restore], [data-beautylab-preview-bridge], [data-beautylab-snapshot-reporter]"));
+    candidates.forEach((script, index) => {
+      if (scriptIds[index]) script.setAttribute("data-frameedit-script-id", scriptIds[index]);
+    });
+  }
+
+  function createPreviewBridgeScript(token, { autoCapture = false } = {}) {
+    return `(function () {
+      var TOKEN = ${JSON.stringify(token)};
+      var RUNTIME_ATTRIBUTE = ${JSON.stringify(RUNTIME_ID_ATTRIBUTE)};
+      var autoCapture = ${autoCapture ? "true" : "false"};
+      var activitySent = false;
+      function ensureRuntimeIds() {
+        var used = new Set(Array.from(document.querySelectorAll('[' + RUNTIME_ATTRIBUTE + ']'), function (element) { return element.getAttribute(RUNTIME_ATTRIBUTE); }));
+        var nextId = 1;
+        Array.from(document.body.querySelectorAll('*')).forEach(function (element) {
+          if (element.id || element.hasAttribute(RUNTIME_ATTRIBUTE) || element.matches('script, style, template[data-frameedit-script-id]')) return;
+          var id;
+          do { id = 'runtime-' + nextId++; } while (used.has(id));
+          used.add(id);
+          element.setAttribute(RUNTIME_ATTRIBUTE, id);
         });
-        Array.from(document.querySelectorAll("textarea")).forEach(function (textarea) { textarea.textContent = textarea.value; });
-        Array.from(document.querySelectorAll("option")).forEach(function (option) { option.toggleAttribute("selected", option.selected); });
+      }
+      function syncFormState() {
+        Array.from(document.querySelectorAll('input')).forEach(function (input) {
+          if (input.type === 'checkbox' || input.type === 'radio') input.toggleAttribute('checked', input.checked);
+          else if (input.type !== 'file') input.setAttribute('value', input.value);
+        });
+        Array.from(document.querySelectorAll('textarea')).forEach(function (textarea) { textarea.textContent = textarea.value; });
+        Array.from(document.querySelectorAll('option')).forEach(function (option) { option.toggleAttribute('selected', option.selected); });
+        Array.from(document.querySelectorAll('details, dialog')).forEach(function (element) { element.toggleAttribute('open', Boolean(element.open)); });
       }
       function collectRuntimeCss() {
         var chunks = [];
         Array.from(document.styleSheets).forEach(function (sheet) {
           var owner = sheet.ownerNode;
-          if (owner && owner.matches && owner.matches("style[data-frameedit-styles]")) return;
+          if (owner && owner.matches && owner.matches('style[data-frameedit-styles]')) return;
           try {
-            var css = Array.from(sheet.cssRules || []).map(function (rule) { return rule.cssText; }).join("\\n");
+            var css = Array.from(sheet.cssRules || []).map(function (rule) { return rule.cssText; }).join('\\n');
             if (css && chunks.indexOf(css) === -1) chunks.push(css);
           } catch (_) {}
         });
-        return chunks.join("\\n\\n");
+        return chunks.join('\\n\\n');
       }
-      function send() {
-        if (sent) return;
-        sent = true;
-        var bodyHtml = document.body.innerHTML;
-        var css = "";
-        var error = "";
-        try {
-          syncFormState();
-          var body = document.body.cloneNode(true);
-          Array.from(body.querySelectorAll("script, template[data-frameedit-script-id]")).forEach(function (node) { node.remove(); });
-          bodyHtml = body.innerHTML;
-          css = collectRuntimeCss();
-        } catch (snapshotError) {
-          error = String((snapshotError && snapshotError.message) || snapshotError || "Runtime snapshot failed");
-        }
-        parent.postMessage({
-          type: "beautylab-runtime-snapshot",
-          token: ${JSON.stringify(token)},
-          body: bodyHtml,
-          css: css,
-          error: error
-        }, "*");
+      function keyFor(element) {
+        return element.id ? { id: element.id } : { runtimeId: element.getAttribute(RUNTIME_ATTRIBUTE) || '' };
       }
-      if (document.readyState === "complete") setTimeout(send, 600);
-      else window.addEventListener("load", function () { setTimeout(send, 600); }, { once: true });
-      setTimeout(send, 4500);
+      function collectRuntimeState() {
+        var records = [];
+        Array.from(document.body.querySelectorAll('*')).forEach(function (element) {
+          if (element.matches('script, style, template')) return;
+          var key = keyFor(element);
+          if (!key.id && !key.runtimeId) return;
+          var attributes = { class: element.getAttribute('class'), style: element.getAttribute('style') };
+          Array.from(element.attributes).forEach(function (attribute) {
+            var name = attribute.name.toLowerCase();
+            if (name.indexOf('aria-') === 0 || (name.indexOf('data-') === 0 && name !== RUNTIME_ATTRIBUTE && name.indexOf('data-beautylab-') !== 0 && name.indexOf('data-frameedit-') !== 0)) attributes[name] = attribute.value;
+          });
+          var record = Object.assign(key, {
+            attributes: attributes,
+            hidden: element.hidden,
+            open: 'open' in element ? Boolean(element.open) : element.hasAttribute('open')
+          });
+          if (!element.children.length && !element.matches('input, textarea, select, option, canvas, svg')) record.text = element.textContent;
+          if ('value' in element && !element.matches('input[type=file]')) record.value = String(element.value == null ? '' : element.value);
+          if ('checked' in element) record.checked = Boolean(element.checked);
+          if (element.options) record.selectedValues = Array.from(element.selectedOptions || [], function (option) { return option.value; });
+          records.push(record);
+        });
+        return {
+          bodyAttributes: Object.fromEntries(Array.from(document.body.attributes, function (attribute) { return [attribute.name, attribute.value]; })),
+          records: records,
+          interaction: {
+            scrollX: window.scrollX || 0,
+            scrollY: window.scrollY || 0,
+            active: document.activeElement && document.activeElement !== document.body ? keyFor(document.activeElement) : null
+          }
+        };
+      }
+      function capture() {
+        ensureRuntimeIds();
+        syncFormState();
+        var runtimeState = collectRuntimeState();
+        var body = document.body.cloneNode(true);
+        Array.from(body.querySelectorAll('script')).forEach(function (script) {
+          var id = script.getAttribute('data-frameedit-script-id');
+          if (!id) { script.remove(); return; }
+          var placeholder = document.createElement('template');
+          placeholder.setAttribute('data-frameedit-script-id', id);
+          script.replaceWith(placeholder);
+        });
+        body.querySelectorAll('script[data-beautylab-preview-bridge], script[data-beautylab-runtime-restore], script[data-beautylab-select-overrides]').forEach(function (node) { node.remove(); });
+        return {
+          body: body.innerHTML,
+          css: collectRuntimeCss(),
+          bodyAttributes: runtimeState.bodyAttributes,
+          runtimeState: runtimeState,
+          interaction: runtimeState.interaction,
+          error: ''
+        };
+      }
+      function post(type, extra) {
+        parent.postMessage(Object.assign({ type: type, token: TOKEN }, extra || {}), '*');
+      }
+      function noteActivity(event) {
+        if (activitySent && event.type === 'click') return;
+        activitySent = true;
+        post('beautylab-preview-interaction', { interactionType: event.type });
+      }
+      ['click', 'input', 'change', 'submit', 'toggle'].forEach(function (type) { document.addEventListener(type, noteActivity, true); });
+      window.addEventListener('message', function (event) {
+        var message = event.data || {};
+        if (event.source !== parent || message.type !== 'beautylab-preview-capture-request' || message.token !== TOKEN) return;
+        var result;
+        try { result = capture(); }
+        catch (error) { result = { body: '', css: '', bodyAttributes: {}, runtimeState: null, interaction: null, error: String((error && error.message) || error || 'Preview capture failed') }; }
+        post('beautylab-preview-capture-result', Object.assign({ requestId: message.requestId }, result));
+      });
+      function ready() { ensureRuntimeIds(); post('beautylab-preview-ready'); }
+      if (document.readyState === 'complete') ready();
+      else window.addEventListener('load', ready, { once: true });
+      setTimeout(ready, 1200);
+      if (autoCapture) {
+        var sendAutomatic = function () {
+          var result;
+          try { result = capture(); }
+          catch (error) { result = { body: '', css: '', bodyAttributes: {}, runtimeState: null, error: String((error && error.message) || error || 'Runtime snapshot failed') }; }
+          post('beautylab-runtime-snapshot', result);
+        };
+        if (document.readyState === 'complete') setTimeout(sendAutomatic, 600);
+        else window.addEventListener('load', function () { setTimeout(sendAutomatic, 600); }, { once: true });
+        setTimeout(sendAutomatic, 4500);
+      }
     })();`;
-    documentNode.body.append(reporter);
+  }
+
+  function createInteractivePreviewDocument(outputHtml, token, options = {}) {
+    const parser = new DOMParser();
+    const documentNode = parser.parseFromString(createPreviewDocument(outputHtml), "text/html");
+    markOriginalScripts(documentNode, options.scriptIds || []);
+    const bridge = documentNode.createElement("script");
+    bridge.setAttribute("data-beautylab-preview-bridge", "");
+    bridge.textContent = createPreviewBridgeScript(token, options);
+    documentNode.body.append(bridge);
     return `<!doctype html>\n${documentNode.documentElement.outerHTML}`;
+  }
+
+  function createRuntimeRestoreState(bodyHtml, bodyAttributes = {}, interaction = null) {
+    const parser = new DOMParser();
+    const documentNode = parser.parseFromString(`<!doctype html><html><body>${bodyHtml || ""}</body></html>`, "text/html");
+    assignRuntimeIds(documentNode);
+    const records = Array.from(documentNode.body.querySelectorAll("*")).flatMap((element) => {
+      if (element.matches("script, style, template")) return [];
+      const id = element.id;
+      const runtimeId = element.getAttribute(RUNTIME_ID_ATTRIBUTE) || "";
+      if (!id && !runtimeId) return [];
+      const attributes = { class: element.getAttribute("class"), style: element.getAttribute("style") };
+      Array.from(element.attributes).forEach((attribute) => {
+        const name = attribute.name.toLowerCase();
+        if (name.startsWith("aria-") || (name.startsWith("data-") && name !== RUNTIME_ID_ATTRIBUTE && !name.startsWith("data-beautylab-") && !name.startsWith("data-frameedit-"))) attributes[name] = attribute.value;
+      });
+      const record = {
+        ...(id ? { id } : { runtimeId }),
+        attributes,
+        hidden: element.hidden,
+        open: "open" in element ? Boolean(element.open) : element.hasAttribute("open"),
+      };
+      if (!element.children.length && !element.matches("input, textarea, select, option, canvas, svg")) record.text = element.textContent;
+      if (element.matches("input:not([type=file]), textarea, select")) record.value = element.value || element.getAttribute("value") || "";
+      if (element.matches("input[type=checkbox], input[type=radio]")) record.checked = element.hasAttribute("checked");
+      if (element.matches("select")) record.selectedValues = Array.from(element.options).filter((option) => option.selected).map((option) => option.value);
+      return [record];
+    });
+    return { bodyAttributes: { ...(bodyAttributes || {}) }, records, interaction: interaction || null };
+  }
+
+  function createRuntimeSnapshotDocument(state, token) {
+    const output = createOutputDocument(state, state.bodyHtml, state.css);
+    return createInteractivePreviewDocument(output, token, {
+      autoCapture: true,
+      scriptIds: state.scripts.map((entry) => entry.id),
+    });
   }
 
   function createPreviewDocument(outputHtml, options = {}) {
@@ -415,11 +576,14 @@
   global.FrameEditIO = Object.freeze({
     attributesToString,
     createOutputDocument,
+    createInteractivePreviewDocument,
     createPreviewDocument,
     createRuntimeSnapshotDocument,
+    createRuntimeRestoreState,
     mergeRuntimeSnapshot,
     normalizeFileName,
     parseHtml,
+    runtimeIdAttribute: RUNTIME_ID_ATTRIBUTE,
     selectIdClassPrefix: SELECT_ID_CLASS_PREFIX,
   });
 })(window);

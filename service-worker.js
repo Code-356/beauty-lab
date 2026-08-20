@@ -1,4 +1,4 @@
-const CACHE_NAME = "beauty-lab-web-shell-2026-08-20-2";
+const CACHE_NAME = "beauty-lab-web-shell-2026-08-20-4";
 const SHELL = ["./", "./index.html", "./styles.css", "./editor-overrides.css", "./vendor/lucide.min.js", "./i18n.js", "./document-io.js", "./select-options.js", "./app.js"];
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
