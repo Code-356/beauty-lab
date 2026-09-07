@@ -7,9 +7,9 @@
     ["object", "data"],
     ["embed", "src"],
   ];
-  const INLINE_STYLE_CLASS_PREFIX = "beautylab-inline-style-";
   const SELECT_ID_CLASS_PREFIX = "beautylab-select-id-";
   const RUNTIME_ID_ATTRIBUTE = "data-beautylab-runtime-id";
+  const STYLESHEET_ATTRIBUTE = "data-frameedit-stylesheet-id";
 
   function attributesToRecord(element) {
     return Object.fromEntries(Array.from(element.attributes, (attribute) => [attribute.name, attribute.value]));
@@ -38,21 +38,56 @@
     return /\.html?$/i.test(safeName) ? safeName : `${safeName}.html`;
   }
 
-  function normalizeInlineStyles(documentNode, classPrefix = INLINE_STYLE_CLASS_PREFIX) {
-    const rules = [];
-    Array.from(documentNode.querySelectorAll("[style]")).forEach((element, index) => {
-      const declaration = element.getAttribute("style")?.trim();
-      if (!declaration) {
-        element.removeAttribute("style");
-        return;
-      }
-      let key = `${classPrefix}${index}`;
-      while (documentNode.getElementsByClassName(key).length) key += "-x";
-      element.classList.add(key);
-      element.removeAttribute("style");
-      rules.push(`.${key} { ${declaration} }`);
+  function preserveStylesheets(documentNode) {
+    return Array.from(documentNode.querySelectorAll('style, link[rel~="stylesheet" i]')).map((node, index) => {
+      const id = `stylesheet-${index}`;
+      const stylesheet = {
+        id,
+        tagName: node.localName,
+        attributes: attributesToRecord(node),
+        cssText: node.localName === "style" ? node.textContent || "" : "",
+      };
+      const placeholder = documentNode.createElement("template");
+      placeholder.setAttribute(STYLESHEET_ATTRIBUTE, id);
+      node.replaceWith(placeholder);
+      return stylesheet;
     });
-    return rules.join("\n");
+  }
+
+  function createStylesheetNode(documentNode, stylesheet) {
+    const node = documentNode.createElement(stylesheet.tagName === "link" ? "link" : "style");
+    applyAttributes(node, stylesheet.attributes);
+    if (node.localName === "style") node.textContent = stylesheet.cssText || "";
+    if (stylesheet.disabled) node.disabled = true;
+    return node;
+  }
+
+  function restoreStylesheets(documentNode, stylesheets = []) {
+    const byId = new Map(stylesheets.map((stylesheet) => [stylesheet.id, stylesheet]));
+    documentNode.querySelectorAll(`template[${STYLESHEET_ATTRIBUTE}]`).forEach((placeholder) => {
+      const stylesheet = byId.get(placeholder.getAttribute(STYLESHEET_ATTRIBUTE));
+      if (stylesheet) placeholder.replaceWith(createStylesheetNode(documentNode, stylesheet));
+      else placeholder.remove();
+    });
+  }
+
+  function injectCanvasStyles(documentNode, state) {
+    if (!documentNode?.head || !state) return;
+    documentNode.querySelectorAll('[data-beautylab-author-style], [data-beautylab-external-style], style[data-frameedit-original-css], base[data-beautylab-base]').forEach((node) => node.remove());
+    if (state.baseHref) {
+      const base = documentNode.createElement("base");
+      base.setAttribute("data-beautylab-base", "");
+      base.setAttribute("href", state.baseHref);
+      documentNode.head.prepend(base);
+    }
+    const anchor = documentNode.head.querySelector("style, link[rel~='stylesheet']");
+    const fragment = documentNode.createDocumentFragment();
+    (state.runtimeStylesheets || state.stylesheets || []).forEach((stylesheet) => {
+      const node = createStylesheetNode(documentNode, stylesheet);
+      node.setAttribute("data-beautylab-author-style", stylesheet.id);
+      fragment.append(node);
+    });
+    documentNode.head.insertBefore(fragment, anchor);
   }
 
   function assignSelectIds(documentNode) {
@@ -66,7 +101,7 @@
     const used = new Set(Array.from(documentNode.querySelectorAll(`[${RUNTIME_ID_ATTRIBUTE}]`), (element) => element.getAttribute(RUNTIME_ID_ATTRIBUTE)));
     let nextId = 1;
     Array.from(documentNode.body?.querySelectorAll("*") || []).forEach((element) => {
-      if (element.id || element.hasAttribute(RUNTIME_ID_ATTRIBUTE) || element.matches("script, style, template[data-frameedit-script-id]")) return;
+      if (element.id || element.hasAttribute(RUNTIME_ID_ATTRIBUTE) || element.matches("script, style, template[data-frameedit-script-id], template[data-frameedit-stylesheet-id]")) return;
       let id;
       do id = `runtime-${nextId++}`;
       while (used.has(id));
@@ -134,9 +169,7 @@
     const frameworkMarkers = documentNode.querySelectorAll("script").length > 0 &&
       /\b(React|Vue|angular|createApp|hydrateRoot)\b/.test(source);
     const scripts = [];
-    const styleNodes = Array.from(documentNode.querySelectorAll("style"));
-    const sourceCss = styleNodes.map((style) => style.textContent || "").join("\n\n");
-    styleNodes.forEach((style) => style.remove());
+    const stylesheets = preserveStylesheets(documentNode);
 
     Array.from(documentNode.querySelectorAll("script")).forEach((script, index) => {
       const id = `script-${index}`;
@@ -149,22 +182,32 @@
     const { inlineHandlerCount, javascriptLinkCount, activeEmbedCount } = disableActiveContent(documentNode);
     assignSelectIds(documentNode);
     assignRuntimeIds(documentNode);
-    const inlineCss = normalizeInlineStyles(documentNode);
-    const css = [sourceCss, inlineCss && `/* Preserved inline styles */\n${inlineCss}`].filter(Boolean).join("\n\n");
+    // Author declarations remain inline or in their original stylesheet nodes.
+    // The editor owns only newly authored CSS, so importing cannot change the cascade.
+    const css = "";
 
     const headClone = documentNode.head.cloneNode(true);
     const title = documentNode.title || normalizeFileName(fileName).replace(/\.html?$/i, "");
+
+    const authorSource = {
+      bodyHtml: documentNode.body.innerHTML,
+      css,
+      bodyAttributes: attributesToRecord(documentNode.body),
+    };
 
     return {
       fileName: normalizeFileName(fileName),
       title,
       originalDoctype,
+      originalHtml: source,
       htmlAttributes: attributesToRecord(documentNode.documentElement),
-      bodyAttributes: attributesToRecord(documentNode.body),
+      bodyAttributes: { ...authorSource.bodyAttributes },
       headHtml: headClone.innerHTML,
-      bodyHtml: documentNode.body.innerHTML,
+      bodyHtml: authorSource.bodyHtml,
       css,
+      authorSource,
       scripts,
+      stylesheets,
       stylesheetLinks,
       baseHref,
       warnings: buildWarnings({
@@ -283,6 +326,8 @@
     documentNode.body.innerHTML = bodyHtml || "";
     documentNode.querySelectorAll("script[data-beautylab-preview-bridge], script[data-beautylab-snapshot-reporter], script[data-beautylab-runtime-restore]").forEach((node) => node.remove());
 
+    restoreStylesheets(documentNode, state.stylesheets);
+
     documentNode.head.querySelector('style[data-frameedit-styles]')?.remove();
     if (css && css.trim()) {
       const style = documentNode.createElement("style");
@@ -348,13 +393,16 @@
     disableActiveContent(runtimeDocument);
     assignSelectIds(runtimeDocument);
     assignRuntimeIds(runtimeDocument);
-    const runtimeInlineCss = normalizeInlineStyles(runtimeDocument, "beautylab-runtime-style-");
-    const runtimeCss = [snapshot.css, runtimeInlineCss].filter((value) => String(value || "").trim()).join("\n\n");
+    const runtimeCss = snapshot.css || "";
     const bodyHtml = runtimeDocument.body.innerHTML;
 
     return {
       bodyHtml: bodyHtml || state.bodyHtml,
       css: runtimeCss,
+      stylesheets: snapshot.stylesheets || null,
+      staticBody: snapshot.staticBody ?? null,
+      staticWarnings: snapshot.staticWarnings || [],
+      authorEdits: snapshot.authorEdits || null,
       bodyAttributes: snapshot.bodyAttributes || state.bodyAttributes,
       runtimeState: snapshot.runtimeState || null,
       mergedRegions: runtimeDocument.body.querySelectorAll("*").length,
@@ -364,18 +412,74 @@
   }
 
   function markOriginalScripts(documentNode, scriptIds = []) {
-    const candidates = Array.from(documentNode.querySelectorAll("script")).filter((script) => !script.matches("[data-beautylab-select-overrides], [data-beautylab-runtime-restore], [data-beautylab-preview-bridge], [data-beautylab-snapshot-reporter]"));
+    const candidates = Array.from(documentNode.querySelectorAll("script")).filter((script) => !script.matches("[data-beautylab-select-overrides], [data-beautylab-runtime-restore], [data-beautylab-preview-bridge], [data-beautylab-snapshot-reporter], [data-beautylab-resource-monitor], [data-beautylab-edit-replay], [data-beautylab-edit-collector]"));
     candidates.forEach((script, index) => {
       if (scriptIds[index]) script.setAttribute("data-frameedit-script-id", scriptIds[index]);
     });
   }
 
-  function createPreviewBridgeScript(token, { autoCapture = false } = {}) {
+  function createResourceMonitorScript(token) {
+    return `(function () {
+      var TOKEN = ${JSON.stringify(token)};
+      var loaded = new Set();
+      var failed = new Set();
+      function resourceUrl(element) {
+        return element && (element.currentSrc || element.src || element.href || element.getAttribute && (element.getAttribute('src') || element.getAttribute('href'))) || '';
+      }
+      function isNetworkResource(element) {
+        return /^https?:/i.test(String(resourceUrl(element)));
+      }
+      function networkResources() {
+        return Array.from(document.querySelectorAll('script[src],link[href],img[src],video[src],audio[src],source[src],iframe[src]')).filter(isNetworkResource);
+      }
+      function post() {
+        var resources = networkResources();
+        parent.postMessage({
+          type: 'beautylab-resource-status',
+          token: TOKEN,
+          total: resources.length,
+          loaded: loaded.size,
+          failed: failed.size,
+          pending: Math.max(0, resources.length - loaded.size - failed.size),
+          online: navigator.onLine !== false,
+          failedUrls: Array.from(failed).slice(0, 8)
+        }, '*');
+      }
+      document.addEventListener('load', function (event) {
+        if (!isNetworkResource(event.target)) return;
+        loaded.add(resourceUrl(event.target));
+        failed.delete(resourceUrl(event.target));
+        post();
+      }, true);
+      document.addEventListener('error', function (event) {
+        if (!isNetworkResource(event.target)) return;
+        failed.add(resourceUrl(event.target));
+        loaded.delete(resourceUrl(event.target));
+        post();
+      }, true);
+      window.addEventListener('online', post);
+      window.addEventListener('offline', post);
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', post, { once: true });
+      else post();
+      window.addEventListener('load', post, { once: true });
+      setTimeout(post, 1600);
+      setTimeout(post, 5000);
+    })();`;
+  }
+
+  function createPreviewBridgeScript(token, { autoCapture = false, trackActivity = true } = {}) {
     return `(function () {
       var TOKEN = ${JSON.stringify(token)};
       var RUNTIME_ATTRIBUTE = ${JSON.stringify(RUNTIME_ID_ATTRIBUTE)};
       var autoCapture = ${autoCapture ? "true" : "false"};
-      var activitySent = false;
+      var trackActivity = ${trackActivity ? "true" : "false"};
+      function cleanEditorClass(value) {
+        if (!value) return value;
+        var cleaned = String(value).split(/\\s+/).filter(function (name) {
+          return name && name !== 'beautylab-live-selected' && name !== 'beautylab-live-hover';
+        }).join(' ');
+        return cleaned || null;
+      }
       function ensureRuntimeIds() {
         var used = new Set(Array.from(document.querySelectorAll('[' + RUNTIME_ATTRIBUTE + ']'), function (element) { return element.getAttribute(RUNTIME_ATTRIBUTE); }));
         var nextId = 1;
@@ -400,13 +504,27 @@
         var chunks = [];
         Array.from(document.styleSheets).forEach(function (sheet) {
           var owner = sheet.ownerNode;
-          if (owner && owner.matches && owner.matches('style[data-frameedit-styles]')) return;
+          if (sheet.disabled || owner && owner.matches && owner.matches('style[data-frameedit-styles], style[data-beautylab-live-style]')) return;
           try {
             var css = Array.from(sheet.cssRules || []).map(function (rule) { return rule.cssText; }).join('\\n');
-            if (css && chunks.indexOf(css) === -1) chunks.push(css);
+            var media = sheet.media && sheet.media.mediaText;
+            if (media && media !== 'all') css = '@media ' + media + ' {\\n' + css + '\\n}';
+            if (css) chunks.push(css);
           } catch (_) {}
         });
         return chunks.join('\\n\\n');
+      }
+      function collectRuntimeStylesheets() {
+        return Array.from(document.querySelectorAll('style, link[rel~="stylesheet" i]')).filter(function (node) {
+          return !node.matches('style[data-beautylab-live-style]');
+        }).map(function (node, index) {
+          var attributes = Object.fromEntries(Array.from(node.attributes, function (attribute) { return [attribute.name, attribute.value]; }));
+          var cssText = node.localName === 'style' ? node.textContent || '' : '';
+          if (node.localName === 'style' && node.sheet) {
+            try { cssText = Array.from(node.sheet.cssRules || [], function (rule) { return rule.cssText; }).join('\\n'); } catch (_) {}
+          }
+          return { id: 'stylesheet-' + index, tagName: node.localName, attributes: attributes, cssText: cssText, disabled: Boolean(node.sheet && node.sheet.disabled) };
+        });
       }
       function keyFor(element) {
         return element.id ? { id: element.id } : { runtimeId: element.getAttribute(RUNTIME_ATTRIBUTE) || '' };
@@ -417,7 +535,7 @@
           if (element.matches('script, style, template')) return;
           var key = keyFor(element);
           if (!key.id && !key.runtimeId) return;
-          var attributes = { class: element.getAttribute('class'), style: element.getAttribute('style') };
+          var attributes = { class: cleanEditorClass(element.getAttribute('class')), style: element.getAttribute('style') };
           Array.from(element.attributes).forEach(function (attribute) {
             var name = attribute.name.toLowerCase();
             if (name.indexOf('aria-') === 0 || (name.indexOf('data-') === 0 && name !== RUNTIME_ATTRIBUTE && name.indexOf('data-beautylab-') !== 0 && name.indexOf('data-frameedit-') !== 0)) attributes[name] = attribute.value;
@@ -448,6 +566,19 @@
         syncFormState();
         var runtimeState = collectRuntimeState();
         var body = document.body.cloneNode(true);
+        body.querySelectorAll('style[data-beautylab-live-style]').forEach(function (node) { node.remove(); });
+        body.querySelectorAll('[data-beautylab-live-draggable]').forEach(function (element) {
+          var original = element.getAttribute('data-beautylab-live-draggable-original');
+          if (original === '__none__' || original == null) element.removeAttribute('draggable');
+          else element.setAttribute('draggable', original);
+          element.removeAttribute('data-beautylab-live-draggable');
+          element.removeAttribute('data-beautylab-live-draggable-original');
+        });
+        body.querySelectorAll('[data-beautylab-live-id]').forEach(function (element) { element.removeAttribute('data-beautylab-live-id'); });
+        body.querySelectorAll('.beautylab-live-selected, .beautylab-live-hover').forEach(function (element) {
+          element.classList.remove('beautylab-live-selected', 'beautylab-live-hover');
+          if (!element.getAttribute('class')) element.removeAttribute('class');
+        });
         Array.from(body.querySelectorAll('script')).forEach(function (script) {
           var id = script.getAttribute('data-frameedit-script-id');
           if (!id) { script.remove(); return; }
@@ -455,10 +586,37 @@
           placeholder.setAttribute('data-frameedit-script-id', id);
           script.replaceWith(placeholder);
         });
-        body.querySelectorAll('script[data-beautylab-preview-bridge], script[data-beautylab-runtime-restore], script[data-beautylab-select-overrides]').forEach(function (node) { node.remove(); });
+        body.querySelectorAll('script[data-beautylab-preview-bridge], script[data-beautylab-live-bridge], script[data-beautylab-runtime-restore], script[data-beautylab-select-overrides]').forEach(function (node) { node.remove(); });
+        var staticBody = body.cloneNode(true);
+        var staticWarnings = [];
+        var originalCanvases = Array.from(document.body.querySelectorAll('canvas'));
+        staticBody.querySelectorAll('canvas').forEach(function (canvas, index) {
+          var original = originalCanvases[index];
+          try {
+            var imageUrl = original && original.toDataURL('image/png');
+            if (!imageUrl || imageUrl === 'data:,') throw new Error('Empty canvas');
+            var image = document.createElement('img');
+            Array.from(canvas.attributes).forEach(function (attribute) { image.setAttribute(attribute.name, attribute.value); });
+            image.src = imageUrl;
+            image.width = original.width;
+            image.height = original.height;
+            if (!image.hasAttribute('alt')) image.alt = canvas.getAttribute('aria-label') || 'Canvas';
+            var computed = getComputedStyle(original);
+            ['display','position','top','right','bottom','left','width','height','min-width','min-height','max-width','max-height','box-sizing','margin-top','margin-right','margin-bottom','margin-left','padding-top','padding-right','padding-bottom','padding-left','border-top','border-right','border-bottom','border-left','border-radius','background','opacity','visibility','transform','transform-origin','box-shadow','vertical-align','float','clear','z-index','flex','align-self','grid-area','order','object-fit','object-position'].forEach(function (name) {
+              image.style.setProperty(name, computed.getPropertyValue(name));
+            });
+            canvas.replaceWith(image);
+          } catch (_) { staticWarnings.push('Canvas ' + (index + 1) + ': image capture unavailable'); }
+        });
+        var embeddedCount = staticBody.querySelectorAll('iframe,object,embed').length;
+        if (embeddedCount) staticWarnings.push(embeddedCount + ' embedded pages or objects cannot be captured as images');
         return {
           body: body.innerHTML,
+          staticBody: staticBody.innerHTML,
+          staticWarnings: staticWarnings,
           css: collectRuntimeCss(),
+          stylesheets: collectRuntimeStylesheets(),
+          authorEdits: window.BeautyLabRuntimeEdits && window.BeautyLabRuntimeEdits.capture ? window.BeautyLabRuntimeEdits.capture() : null,
           bodyAttributes: runtimeState.bodyAttributes,
           runtimeState: runtimeState,
           interaction: runtimeState.interaction,
@@ -469,8 +627,7 @@
         parent.postMessage(Object.assign({ type: type, token: TOKEN }, extra || {}), '*');
       }
       function noteActivity(event) {
-        if (activitySent && event.type === 'click') return;
-        activitySent = true;
+        if (!trackActivity) return;
         post('beautylab-preview-interaction', { interactionType: event.type });
       }
       ['click', 'input', 'change', 'submit', 'toggle'].forEach(function (type) { document.addEventListener(type, noteActivity, true); });
@@ -504,6 +661,12 @@
     const parser = new DOMParser();
     const documentNode = parser.parseFromString(createPreviewDocument(outputHtml), "text/html");
     markOriginalScripts(documentNode, options.scriptIds || []);
+    const resourceMonitor = documentNode.createElement("script");
+    resourceMonitor.setAttribute("data-beautylab-resource-monitor", "");
+    resourceMonitor.textContent = createResourceMonitorScript(token);
+    const csp = documentNode.head.querySelector('meta[http-equiv="Content-Security-Policy" i]');
+    if (csp) csp.after(resourceMonitor);
+    else documentNode.head.prepend(resourceMonitor);
     const bridge = documentNode.createElement("script");
     bridge.setAttribute("data-beautylab-preview-bridge", "");
     bridge.textContent = createPreviewBridgeScript(token, options);
@@ -548,6 +711,49 @@
     });
   }
 
+  function createAuthorOutputDocument(state) {
+    const source = state?.authorSource;
+    if (!source?.bodyHtml && source?.bodyHtml !== "") return null;
+    return createOutputDocument(
+      { ...state, bodyAttributes: { ...(source.bodyAttributes || state.bodyAttributes || {}) } },
+      source.bodyHtml,
+      source.css || "",
+    );
+  }
+
+  function createStaticOutputDocument(state, snapshot = {}) {
+    const body = snapshot.staticBody ?? snapshot.bodyHtml ?? snapshot.body ?? state.bodyHtml;
+    const stylesheets = snapshot.stylesheets || snapshot.runtimeStylesheets || state.runtimeStylesheets;
+    const output = createOutputDocument(
+      { ...state, scripts: [], bodyAttributes: snapshot.bodyAttributes || state.bodyAttributes },
+      body,
+      stylesheets ? "" : snapshot.css || state.css || "",
+    );
+    const documentNode = new DOMParser().parseFromString(output, "text/html");
+    if (stylesheets) {
+      documentNode.querySelectorAll('style, link[rel~="stylesheet" i], template[data-frameedit-stylesheet-id]').forEach((node) => node.remove());
+      stylesheets.forEach((stylesheet) => documentNode.head.append(createStylesheetNode(documentNode, stylesheet)));
+    }
+    documentNode.querySelectorAll('script, template[data-frameedit-script-id], meta[http-equiv="refresh" i], meta[http-equiv="Content-Security-Policy" i]').forEach((node) => node.remove());
+    const csp = documentNode.createElement("meta");
+    csp.setAttribute("http-equiv", "Content-Security-Policy");
+    csp.setAttribute("content", "script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'");
+    documentNode.head.prepend(csp);
+    disableActiveContent(documentNode);
+    documentNode.querySelectorAll('*').forEach((element) => {
+      Array.from(element.attributes).forEach((attribute) => {
+        if (/^data-frameedit-(handler-|js-|active-)/.test(attribute.name)) element.removeAttribute(attribute.name);
+        if (["href", "xlink:href", "formaction", "action", "src"].includes(attribute.name)) {
+          try {
+            if (new URL(attribute.value, "https://static.invalid/").protocol === "javascript:") element.removeAttribute(attribute.name);
+          } catch { /* Invalid URLs remain inert in the static copy. */ }
+        }
+      });
+      if (element.localName === "iframe") element.setAttribute("sandbox", "");
+    });
+    return `${state.originalDoctype || "<!doctype html>"}\n${documentNode.documentElement.outerHTML}`;
+  }
+
   function createPreviewDocument(outputHtml, options = {}) {
     const parser = new DOMParser();
     const documentNode = parser.parseFromString(outputHtml, "text/html");
@@ -575,12 +781,15 @@
 
   global.FrameEditIO = Object.freeze({
     attributesToString,
+    createAuthorOutputDocument,
     createOutputDocument,
     createInteractivePreviewDocument,
     createPreviewDocument,
     createRuntimeSnapshotDocument,
     createRuntimeRestoreState,
+    createStaticOutputDocument,
     mergeRuntimeSnapshot,
+    injectCanvasStyles,
     normalizeFileName,
     parseHtml,
     runtimeIdAttribute: RUNTIME_ID_ATTRIBUTE,

@@ -301,11 +301,200 @@
 .toast-region {
   position: fixed;
   right: 16px;
-  bottom: 16px;
+  bottom: 54px;
   z-index: 1000;
   display: grid;
   gap: 8px;
   pointer-events: none;
+}
+
+.app-shell {
+  --canvas-status-height: 38px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--toolbar-height) var(--toolstrip-height) minmax(0, 1fr) var(--canvas-status-height);
+}
+
+.app-shell.preview-mode,
+.app-shell.live-compat-preview {
+  grid-template-rows: var(--toolbar-height) 0 minmax(0, 1fr) var(--canvas-status-height);
+}
+
+.app-shell.no-document {
+  grid-template-rows: var(--toolbar-height) 0 minmax(0, 1fr) 0;
+}
+
+.app-shell.no-document .canvas-statusbar { display: none; }
+.canvas-column { grid-template-rows: minmax(0, 1fr); }
+.canvas-stage { overflow: auto; }
+
+.app-shell:not(.no-document) #gjs {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.gjs-cv-canvas { background: transparent; }
+#gjs > .gjs-editor { background: transparent !important; }
+.gjs-frame-wrapper { margin: 0 !important; transition: none !important; }
+
+.zoom-viewport {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px;
+  background: #dfe1dd;
+}
+
+.zoom-page,
+.live-compat-frame-wrap.zoom-page {
+  position: relative;
+  flex: none;
+  margin: 0;
+  border: 0;
+  overflow: hidden;
+  background: #ffffff;
+  box-shadow: 0 2px 14px rgba(27, 31, 26, 0.16);
+}
+
+.zoom-page > iframe {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  max-width: none;
+  transform-origin: top left;
+}
+
+.canvas-statusbar { gap: 12px; }
+.draft-status { max-width: 115px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-mode-control { display: flex; align-items: center; gap: 12px; margin: 12px 18px; font-size: 12px; }
+.export-mode-control[hidden] { display: none; }
+.export-mode-control select { padding: 7px; border: 1px solid var(--line); background: var(--panel-strong); color: var(--ink); border-radius: 4px; }
+.canvas-statusbar .selection-path { flex: 1; }
+.canvas-view-controls,
+.zoom-controls,
+.custom-viewport-controls,
+.zoom-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.custom-viewport-controls[hidden] { display: none; }
+.canvas-view-controls { gap: 12px; }
+.canvas-statusbar .icon-button { width: 28px; height: 28px; }
+.canvas-statusbar .icon-button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.canvas-statusbar .viewport-control select { height: 28px; max-width: 190px; }
+.canvas-statusbar input[type="range"] { width: 110px; height: 22px; margin: 0; accent-color: var(--accent); }
+.zoom-value { gap: 0; width: 58px; justify-content: center; }
+.canvas-statusbar input[type="number"] {
+  width: 47px;
+  height: 27px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 2px;
+  color: var(--ink);
+  background: var(--panel-strong);
+  text-align: center;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.canvas-statusbar input::-webkit-inner-spin-button,
+.canvas-statusbar input::-webkit-outer-spin-button { appearance: none; margin: 0; }
+.canvas-statusbar .custom-viewport-controls input { width: 54px; }
+.canvas-statusbar input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+@media (max-width: 700px) {
+  .draft-status { display: none; }
+  .app-shell { --canvas-status-height: 78px; }
+  .canvas-statusbar .selection-path { display: none; }
+  .canvas-view-controls { flex-wrap: wrap; justify-content: center; width: 100%; gap: 4px 8px; }
+  .zoom-controls { justify-content: center; width: 100%; min-width: 0; }
+  .canvas-statusbar input[type="range"] { width: 110px; min-width: 40px; flex-shrink: 1; }
+  .zoom-viewport { padding: 12px; }
+}
+
+.startup-error {
+  position: fixed;
+  z-index: 10000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: #20231f;
+  background: rgba(236, 239, 233, 0.96);
+}
+
+.startup-error[hidden] {
+  display: none;
+}
+
+.startup-error-card {
+  width: min(620px, 100%);
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+  padding: 24px;
+  border: 1px solid #c9cdc5;
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 20px 55px rgba(25, 28, 24, 0.18);
+}
+
+.startup-error-mark {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  color: #ffffff;
+  background: #dc5b4c;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.startup-error-card strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 18px;
+}
+
+.startup-error-card p {
+  margin: 5px 0;
+  color: #555b53;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.startup-error-card small {
+  display: block;
+  margin-top: 10px;
+  color: #9d3b32;
+  overflow-wrap: anywhere;
+}
+
+.startup-error-card button {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 4px;
+  color: #ffffff;
+  background: #20231f;
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .startup-error-card {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .startup-error-card button {
+    grid-column: 1 / -1;
+  }
 }
 
 .toast {
@@ -470,4 +659,28 @@
   .drop-overlay {
     inset: 10px;
   }
+}
+
+@media (max-width: 960px) {
+  .topbar {
+    grid-template-columns: minmax(118px, auto) minmax(0, 1fr);
+  }
+  .toolstrip { min-width: 0; overflow-x: auto; }
+  .toolstrip > * { flex-shrink: 0; }
+  .app-shell:not(.preview-mode):not(.live-compat-mode):not(.no-document) .workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(150px, 26vh) minmax(310px, 1fr) minmax(240px, 42vh);
+    overflow-y: auto;
+  }
+  .app-shell:not(.live-compat-mode) .left-sidebar { grid-column: 1; grid-row: 1; border-right: 0; }
+  .app-shell:not(.live-compat-mode) .canvas-column { grid-column: 1; grid-row: 2; }
+  .app-shell:not(.live-compat-mode) .right-sidebar { grid-column: 1; grid-row: 3; border-left: 0; }
+  .app-shell:not(.preview-mode):not(.live-compat-mode):not(.no-document) .workspace.left-collapsed {
+    grid-template-rows: 0 minmax(310px, 1fr) minmax(240px, 42vh);
+  }
+  .app-shell.no-document .canvas-column { grid-row: 1; }
+}
+
+@media (max-width: 700px) {
+  .toast-region { bottom: 94px; }
 }

@@ -20,6 +20,8 @@
     modeSwitch: $("#mode-switch"),
     editModeButton: $("#edit-mode-button"),
     previewModeButton: $("#preview-mode-button"),
+    liveCompatButton: $("#live-compat-button"),
+    liveCompatMenuState: $("#live-compat-menu-state"),
     saveButton: $("#save-button"),
     exportButton: $("#export-button"),
     printButton: $("#print-button"),
@@ -56,6 +58,13 @@
     previewStatusText: $("#preview-status-text"),
     retryPreviewSyncButton: $("#retry-preview-sync-button"),
     discardPreviewButton: $("#discard-preview-button"),
+    liveCompatStage: $("#live-compat-stage"),
+    liveCompatFrameWrap: $("#live-compat-frame-wrap"),
+    liveCompatFrame: $("#live-compat-frame"),
+    liveCompatStatusText: $("#live-compat-status-text"),
+    liveSelectionToolbar: $("#live-selection-toolbar"),
+    liveImageResizeHandle: $("#live-image-resize-handle"),
+    liveSelectionActions: $$('[data-live-selection-action]'),
     printFrame: $("#print-frame"),
     documentNameButton: $("#document-name-button"),
     documentName: $("#document-name"),
@@ -80,6 +89,32 @@
     removeSelectOptionButton: $("#remove-select-option-button"),
     imageTools: $("#image-tools"),
     canvasTools: $("#canvas-tools"),
+    liveCompatTools: $("#live-compat-tools"),
+    liveSelectionTag: $("#live-selection-tag"),
+    liveTextSection: $("#live-text-section"),
+    liveTextCount: $("#live-text-count"),
+    liveTextList: $("#live-text-list"),
+    liveSelectSection: $("#live-select-section"),
+    liveSelectTitle: $("#live-select-title"),
+    liveSelectDescription: $("#live-select-description"),
+    liveSelectCount: $("#live-select-count"),
+    liveSelectList: $("#live-select-list"),
+    liveSelectEmpty: $("#live-select-empty"),
+    liveSelectRuntimeNote: $("#live-select-runtime-note"),
+    liveAddOptionButton: $("#live-add-option-button"),
+    liveRemoveOptionButton: $("#live-remove-option-button"),
+    liveImageSection: $("#live-image-section"),
+    liveCanvasSection: $("#live-canvas-section"),
+    liveReplaceImageButton: $("#live-replace-image-button"),
+    liveImageWidthSlider: $("#live-image-width-slider"),
+    liveImageWidthOutput: $("#live-image-width-output"),
+    liveImageWidthPresets: $$('[data-live-image-width]'),
+    liveStyleFields: $$('[data-live-style]'),
+    liveStyleButtons: $$('[data-live-style-button]'),
+    liveColorValues: $$('[data-live-color-value]'),
+    layersHint: $("#layers-hint"),
+    layersPanel: $("#layers"),
+    liveLayers: $("#live-layers"),
     rightSidebar: $(".right-sidebar"),
     replaceImageButton: $("#replace-image-button"),
     imageFileInput: $("#image-file-input"),
@@ -125,6 +160,22 @@
     previewHistory: [],
     previewHistoryIndex: -1,
     applyingPreviewHistory: false,
+    editingEngine: "standard",
+    hasAuthorEdits: false,
+    liveCompatToken: "",
+    liveCompatReady: false,
+    liveCompatSelection: null,
+    liveCompatSnapshot: null,
+    liveCompatEntrySnapshot: null,
+    liveCompatInteracted: false,
+    liveCompatHistory: { canUndo: false, canRedo: false },
+    liveCompatResources: null,
+    liveCompatLayers: [],
+    revision: 0,
+    documentEpoch: 0,
+    liveSourceHtml: null,
+    recoveredEdits: null,
+    exportMode: "interactive",
   };
   const htmlPickerTypes = [{
     description: "HTML 文件",
@@ -135,8 +186,9 @@
   const pendingTextCommits = new Set();
   let hoveredCanvasComponent = null;
   let selectHoverTimer = null;
+  let liveImageResize = null;
 
-  if (!window.FrameEditIO || !window.FrameEditSelectOptions) {
+  if (!window.FrameEditIO || !window.FrameEditSelectOptions || !window.BeautyLabLiveCompat) {
     document.body.innerHTML = "<main style='max-width:680px;margin:80px auto;padding:32px;font-family:sans-serif;line-height:1.7'><h1>编辑器资源未完整载入</h1><p>请先完整解压 ZIP，再打开 index.html；也可以直接使用单文件版 Edward-HTML-Beauty-Lab.html。</p><p>本工具无需 localhost、无需安装，也不需要联网。</p></main>";
     return;
   }
@@ -144,6 +196,78 @@
   let editor = null;
   let editorReadyPromise = null;
   let selectOptionsController = null;
+  let draftController = null;
+  let objectController = null;
+  const canvasView = BeautyLabCanvasView.create({
+    getEditor: () => editor,
+    getState: () => state,
+    onChange: () => {
+      if (state.document && !state.loading) draftController?.schedule();
+      if (state.editingEngine !== "live") return;
+      renderLiveSelectionToolbar(state.liveCompatSelection);
+      renderLiveImageResizeHandle(state.liveCompatSelection);
+      postLiveCompat("beautylab-live-request-selection");
+    },
+  });
+  draftController = BeautyLabDraftUI.create({
+    showToast,
+    capture: async () => {
+      if (!state.document || state.loading) return null;
+      const epoch = state.documentEpoch;
+      flushPendingTextEdits();
+      let previewHtml = null;
+      if (state.editingEngine === "live") await captureLiveCompatSnapshot({ quiet: true });
+      else if (state.mode === "preview" && state.previewInteracted) {
+        const result = await requestPreviewCapture();
+        if (epoch !== state.documentEpoch) return null;
+        if (!result.body?.trim()) throw new Error("预览同步未返回有效内容，请重试。");
+        const merged = FrameEditIO.mergeRuntimeSnapshot(state.document, result);
+        if (!merged.snapshotApplied) throw new Error("预览同步未返回有效内容，请重试。");
+        previewHtml = outputWithView(FrameEditIO.createOutputDocument({ ...state.document, bodyAttributes: merged.bodyAttributes, stylesheets: merged.stylesheets || state.document.stylesheets }, merged.bodyHtml, editor.getCss({ avoidProtected: true })));
+      }
+      if (epoch !== state.documentEpoch) return null;
+      return { html: previewHtml || buildOutput({ mode: "interactive" }), fileName: state.document.fileName, viewSettings: canvasView.getSettings(), dirty: state.dirty || state.previewInteracted };
+    },
+    restore: async (payload, { id }) => {
+      await loadDocument(payload.html, payload.fileName, null, { editableFileName: true, draftId: id, viewSettings: payload.viewSettings });
+      setDirty(true);
+    },
+    onStatus: (status) => {
+      const label = $("#draft-status");
+      if (label) label.textContent = i18n.t(status === "saving" ? "正在保存草稿" : status === "saved" ? "草稿已保存" : status === "error" ? "草稿保存失败" : "");
+    },
+  });
+
+  objectController = BeautyLabEditorObjects.create({
+    getEditor: () => editor,
+    getState: () => ({ mode: state.mode, liveActive: state.editingEngine === "live", liveSelection: state.liveCompatSelection, hasDocument: Boolean(state.document) }),
+    postLive: postLiveCompat,
+    commitAtomic: (action) => {
+      const before = captureEditorState();
+      state.loading = true;
+      try { editor.UndoManager.skip(action); }
+      finally { state.loading = false; }
+      state.hasAuthorEdits = true;
+      setDirty(true);
+      pushPreviewHistory(before, captureEditorState());
+      updateUndoRedo();
+    },
+    showToast,
+    refreshSelection: updateSelectionUI,
+  });
+
+  const imageResizableOptions = Object.freeze({
+    ratioDefault: 1,
+    minDim: 24,
+    tl: true,
+    tc: false,
+    tr: true,
+    cl: false,
+    cr: false,
+    bl: true,
+    bc: false,
+    br: true,
+  });
 
   function createEditor() {
     if (editor) return editor;
@@ -156,6 +280,9 @@
     telemetry: false,
     cssIcons: "",
     storageManager: false,
+    avoidInlineStyle: false,
+    forceClass: false,
+    protectedCss: "",
     noticeOnUnload: false,
     panels: { defaults: [] },
     layerManager: { appendTo: "#layers" },
@@ -421,6 +548,10 @@
 
   function setDirty(dirty) {
     state.dirty = dirty;
+    if (dirty && !state.loading) {
+      state.revision += 1;
+      draftController?.schedule();
+    }
     ui.dirtyDot.hidden = !dirty;
     if (!state.document) {
       ui.documentState.textContent = "等待载入";
@@ -449,6 +580,7 @@
   }
 
   function applyEcoMode(enabled, persist = true) {
+    document.body.classList.toggle("eco-mode", enabled);
     ui.appShell.classList.toggle("eco-mode", enabled);
     ui.ecoButton.setAttribute("aria-pressed", String(enabled));
     const label = enabled ? "关闭 L4TF 节能模式" : "开启 L4TF 节能模式";
@@ -464,6 +596,16 @@
     const label = switchToChinese ? "Switch to Chinese" : "切换到英文";
     ui.languageButton.title = label;
     ui.languageButton.setAttribute("aria-label", label);
+    updateLiveCompatMenu();
+  }
+
+  function updateLiveCompatMenu() {
+    const enabled = state.editingEngine === "live";
+    ui.liveCompatButton.setAttribute("aria-checked", String(enabled));
+    ui.liveCompatMenuState.textContent = i18n.t(enabled ? "已开启" : "已关闭");
+    const label = enabled ? "关闭联网兼容模式" : "开启联网兼容模式";
+    ui.liveCompatButton.title = i18n.t(label);
+    ui.liveCompatButton.setAttribute("aria-label", i18n.t(label));
   }
 
   function setMoreMenuOpen(open) {
@@ -471,21 +613,40 @@
     ui.moreMenuButton.setAttribute("aria-expanded", String(open));
   }
 
+  let embeddedUserGuidePromise = null;
+
   function readEmbeddedUserGuide() {
+    if (embeddedUserGuidePromise) return embeddedUserGuidePromise;
     const payload = $("#beauty-lab-embedded-guide")?.textContent?.trim();
-    if (!payload) return "";
-    try {
+    if (!payload) return Promise.resolve("");
+    embeddedUserGuidePromise = (async () => {
       const parsed = JSON.parse(payload);
-      return typeof parsed.html === "string" ? parsed.html : "";
-    } catch {
-      return "";
-    }
+      if (typeof parsed.html === "string") return parsed.html;
+      if (parsed.encoding !== "gzip-base64" || typeof parsed.data !== "string") return "";
+      if (typeof window.DecompressionStream !== "function") {
+        throw new Error("当前浏览器版本过旧，无法解压内嵌指南。请升级 Edge 或 Chrome。");
+      }
+      const binary = window.atob(parsed.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+      return new Response(stream).text();
+    })().catch((error) => {
+      embeddedUserGuidePromise = null;
+      throw error;
+    });
+    return embeddedUserGuidePromise;
   }
 
-  function openUserGuide() {
+  async function openUserGuide() {
     setMoreMenuOpen(false);
     const language = i18n.getLanguage() === "en" ? "en" : "zh";
-    const embeddedGuide = readEmbeddedUserGuide();
+    let embeddedGuide = "";
+    try {
+      embeddedGuide = await readEmbeddedUserGuide();
+    } catch (error) {
+      showToast(error.message || "无法打开内嵌用户指南。", "error");
+    }
     let guideUrl;
 
     if (embeddedGuide) {
@@ -577,7 +738,7 @@
   function setDocumentAvailability(available) {
     ui.appShell.classList.toggle("no-document", !available);
     ui.emptyState.hidden = available;
-    [ui.editModeButton, ui.previewModeButton, ui.exportButton, ui.printButton, ui.warningsButton, ui.insertImageButton, ui.toggleLayersButton].forEach((button) => {
+    [ui.editModeButton, ui.previewModeButton, ui.exportButton, ui.printButton, ui.warningsButton, ui.insertImageButton, ui.toggleLayersButton, ui.liveCompatButton].forEach((button) => {
       button.disabled = !available;
     });
     updateSaveButton();
@@ -594,6 +755,11 @@
   }
 
   function updateUndoRedo() {
+    if (state.editingEngine === "live") {
+      ui.undoButton.disabled = !state.liveCompatHistory.canUndo;
+      ui.redoButton.disabled = !state.liveCompatHistory.canRedo;
+      return;
+    }
     if (!editor) {
       ui.undoButton.disabled = true;
       ui.redoButton.disabled = true;
@@ -621,6 +787,8 @@
       bodyAttributes: { ...editor.DomComponents.getWrapper().getAttributes() },
       runtimeCss: state.document.runtimeCss || "",
       runtimeRestore: state.document.runtimeRestore ? JSON.parse(JSON.stringify(state.document.runtimeRestore)) : null,
+      runtimeStylesheets: state.document.runtimeStylesheets || null,
+      hasAuthorEdits: state.hasAuthorEdits,
       modifiedSelectIds: Array.from(state.modifiedSelectIds),
       dirty: state.dirty,
     };
@@ -634,6 +802,7 @@
       bodyAttributes: snapshot.bodyAttributes,
       runtimeCss: snapshot.runtimeCss,
       runtimeRestore: snapshot.runtimeRestore,
+      runtimeStylesheets: snapshot.runtimeStylesheets,
       modifiedSelectIds: snapshot.modifiedSelectIds,
     });
   }
@@ -653,10 +822,11 @@
       bodyAttributes: { ...snapshot.bodyAttributes },
       runtimeCss: snapshot.runtimeCss || "",
       runtimeRestore: snapshot.runtimeRestore ? JSON.parse(JSON.stringify(snapshot.runtimeRestore)) : null,
+      runtimeStylesheets: snapshot.runtimeStylesheets || null,
     };
+    state.hasAuthorEdits = snapshot.hasAuthorEdits !== false;
     state.modifiedSelectIds = new Set(snapshot.modifiedSelectIds || []);
-    injectRawCanvasCss([state.document.css, state.document.runtimeCss].filter(Boolean).join("\n\n"));
-    injectCanvasStylesheetLinks(state.document.stylesheetLinks, state.document.baseHref);
+    refreshCanvasStyles();
     setDirty(Boolean(snapshot.dirty));
     updateSelectionUI();
     editor.clearDirtyCount?.();
@@ -970,8 +1140,27 @@
 
   function imageWidthPercent(component) {
     const match = String(component?.getStyle?.().width || "").trim().match(/^(\d+(?:\.\d+)?)%$/);
-    if (!match) return null;
-    return Math.min(100, Math.max(10, Math.round(Number(match[1]))));
+    if (match) return Math.min(100, Math.max(1, Math.round(Number(match[1]))));
+    const element = component?.getEl?.();
+    const parent = element?.parentElement;
+    if (!element || !parent) return null;
+    const parentStyle = element.ownerDocument.defaultView.getComputedStyle(parent);
+    const parentWidth = parent.getBoundingClientRect().width
+      - (parseFloat(parentStyle.paddingLeft) || 0)
+      - (parseFloat(parentStyle.paddingRight) || 0)
+      - (parseFloat(parentStyle.borderLeftWidth) || 0)
+      - (parseFloat(parentStyle.borderRightWidth) || 0);
+    if (!parentWidth) return null;
+    return Math.min(100, Math.max(1, Math.round(element.getBoundingClientRect().width / parentWidth * 100)));
+  }
+
+  function ensureImageResizable(component) {
+    if (!component || componentTagName(component) !== "img") return;
+    const current = component.get?.("resizable");
+    const next = current && typeof current === "object"
+      ? { ...current, ...imageResizableOptions }
+      : { ...imageResizableOptions };
+    component.set("resizable", next, { silent: true });
   }
 
   function updateImageControls(component) {
@@ -986,7 +1175,417 @@
     });
   }
 
+  function colorToHex(value, fallback = "#000000") {
+    const input = String(value || "").trim();
+    if (/^#[0-9a-f]{6}$/i.test(input)) return input;
+    if (/^#[0-9a-f]{3}$/i.test(input)) return `#${input[1]}${input[1]}${input[2]}${input[2]}${input[3]}${input[3]}`;
+    const channels = input.match(/[\d.]+/g);
+    if (!channels || channels.length < 3 || (channels.length > 3 && Number(channels[3]) === 0)) return fallback;
+    return `#${channels.slice(0, 3).map((channel) => Math.max(0, Math.min(255, Math.round(Number(channel)))).toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  function liveComponentLabel(selection) {
+    if (!selection) return "样式";
+    if (selection.selectKind) return selection.selectKind === "custom" ? "自定义下拉框" : "下拉框";
+    const labels = {
+      h1: "一级标题", h2: "二级标题", h3: "三级标题", p: "段落", span: "文字",
+      button: "按钮", label: "标签", img: "图片", canvas: "Canvas 图表", svg: "SVG 图形",
+      select: "下拉框", input: "输入框", textarea: "文本框", li: "列表项", td: "表格单元格", th: "表头单元格",
+      section: "分区", main: "主体", div: "容器", a: "链接",
+    };
+    return labels[selection.tag] || String(selection.tag || "元素").toUpperCase();
+  }
+
+  function setLayersPanelMode(live) {
+    ui.layersPanel.hidden = live;
+    ui.liveLayers.hidden = !live;
+    ui.layersHint.textContent = i18n.t(live
+      ? "点击图层可选择元素；使用上移或下移调整顺序"
+      : "拖动图层可调整元素顺序");
+    if (live) renderLiveLayers();
+  }
+
+  function syncLiveLayerSelection() {
+    const selectedId = state.liveCompatSelection?.liveId || "";
+    ui.liveLayers.querySelectorAll(".live-layer-row").forEach((row) => {
+      const selected = row.dataset.liveId === selectedId;
+      row.classList.toggle("is-selected", selected);
+      row.setAttribute("aria-pressed", String(selected));
+    });
+  }
+
+  function renderLiveLayers() {
+    if (state.editingEngine !== "live") return;
+    const scrollTop = ui.liveLayers.scrollTop;
+    const fragment = document.createDocumentFragment();
+    const layers = Array.isArray(state.liveCompatLayers) ? state.liveCompatLayers : [];
+    if (!layers.length) {
+      const empty = document.createElement("p");
+      empty.className = "live-layer-empty";
+      empty.textContent = i18n.t("正在读取脚本运行后的页面图层…");
+      fragment.append(empty);
+    } else {
+      layers.forEach((layer) => {
+        if (!layer?.liveId) return;
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "live-layer-row";
+        row.dataset.liveId = layer.liveId;
+        row.style.setProperty("--layer-indent", `${7 + Math.min(8, Math.max(0, Number(layer.depth) || 0)) * 12}px`);
+        row.title = String(layer.label || layer.tag || "");
+        row.setAttribute("aria-label", `${String(layer.tag || "element")} ${String(layer.label || "")}`.trim());
+        row.innerHTML = '<span class="live-layer-tag"></span><span class="live-layer-label"></span>';
+        row.querySelector(".live-layer-tag").textContent = String(layer.tag || "element");
+        row.querySelector(".live-layer-label").textContent = String(layer.label || layer.tag || "element");
+        row.addEventListener("click", () => postLiveCompat("beautylab-live-select-layer", { liveId: layer.liveId }));
+        fragment.append(row);
+      });
+    }
+    ui.liveLayers.replaceChildren(fragment);
+    ui.liveLayers.scrollTop = scrollTop;
+    syncLiveLayerSelection();
+  }
+
+  function renderLiveSelectionToolbar(selection) {
+    const rect = scaledLiveRect(selection?.rect);
+    if (!selection || !rect || state.mode === "preview") {
+      ui.liveSelectionToolbar.hidden = true;
+      return;
+    }
+    const viewportWidth = Number(rect.viewportWidth) || ui.liveCompatFrame.clientWidth;
+    const viewportHeight = Number(rect.viewportHeight) || ui.liveCompatFrame.clientHeight;
+    if (Number(rect.bottom) < 0 || Number(rect.top) > viewportHeight || Number(rect.right) < 0 || Number(rect.left) > viewportWidth) {
+      ui.liveSelectionToolbar.hidden = true;
+      return;
+    }
+    ui.liveSelectionToolbar.hidden = false;
+    ui.liveSelectionActions.forEach((button) => {
+      const action = button.dataset.liveSelectionAction;
+      button.disabled = action === "move-up" ? !selection.canMoveUp : action === "move-down" ? !selection.canMoveDown : false;
+    });
+    window.requestAnimationFrame(() => {
+      if (ui.liveSelectionToolbar.hidden || state.liveCompatSelection?.liveId !== selection.liveId) return;
+      const toolbarWidth = ui.liveSelectionToolbar.offsetWidth || 116;
+      const toolbarHeight = ui.liveSelectionToolbar.offsetHeight || 32;
+      const wrapWidth = ui.liveCompatFrameWrap.clientWidth;
+      const wrapHeight = ui.liveCompatFrameWrap.clientHeight;
+      const left = Math.max(7, Math.min(wrapWidth - toolbarWidth - 7, Number(rect.right) - toolbarWidth));
+      const preferredTop = Number(rect.top) - toolbarHeight - 7;
+      const top = preferredTop >= 7
+        ? preferredTop
+        : Math.max(7, Math.min(wrapHeight - toolbarHeight - 7, Number(rect.bottom) + 7));
+      ui.liveSelectionToolbar.style.left = `${left}px`;
+      ui.liveSelectionToolbar.style.top = `${top}px`;
+    });
+  }
+
+  function renderLiveImageResizeHandle(selection) {
+    const rect = scaledLiveRect(selection?.rect);
+    if (!selection?.isImage || !rect || state.mode === "preview") {
+      ui.liveImageResizeHandle.hidden = true;
+      return;
+    }
+    const viewportWidth = Number(rect.viewportWidth) || ui.liveCompatFrame.clientWidth;
+    const viewportHeight = Number(rect.viewportHeight) || ui.liveCompatFrame.clientHeight;
+    if (Number(rect.bottom) < 0 || Number(rect.top) > viewportHeight || Number(rect.right) < 0 || Number(rect.left) > viewportWidth) {
+      ui.liveImageResizeHandle.hidden = true;
+      return;
+    }
+    const wrapWidth = ui.liveCompatFrameWrap.clientWidth;
+    const wrapHeight = ui.liveCompatFrameWrap.clientHeight;
+    ui.liveImageResizeHandle.hidden = false;
+    ui.liveImageResizeHandle.style.left = `${Math.max(0, Math.min(wrapWidth - 16, Number(rect.right) - 8))}px`;
+    ui.liveImageResizeHandle.style.top = `${Math.max(0, Math.min(wrapHeight - 16, Number(rect.bottom) - 8))}px`;
+  }
+
+  function liveResizePercent(event) {
+    if (!liveImageResize) return 100;
+    const delta = (event.clientX - liveImageResize.startX) / canvasView.getScale();
+    return Math.max(1, Math.min(100, liveImageResize.startPercent + delta / liveImageResize.parentWidth * 100));
+  }
+
+  function updateLiveResizePreview(percent) {
+    const rounded = Math.round(percent);
+    ui.liveImageWidthSlider.value = String(rounded);
+    ui.liveImageWidthOutput.value = `${rounded}%`;
+    ui.liveImageWidthOutput.textContent = `${rounded}%`;
+    const rect = scaledLiveRect(liveImageResize?.startRect);
+    if (!rect) return;
+    const nextWidth = liveImageResize.parentWidth * percent / 100 * canvasView.getScale();
+    const wrapWidth = ui.liveCompatFrameWrap.clientWidth;
+    ui.liveImageResizeHandle.style.left = `${Math.max(0, Math.min(wrapWidth - 16, Number(rect.left) + nextWidth - 8))}px`;
+  }
+
+  function scaledLiveRect(rect) {
+    if (!rect) return null;
+    const scale = canvasView.getScale();
+    return Object.fromEntries(Object.entries(rect).map(([key, value]) => [key, Number(value) * scale]));
+  }
+
+  function startLiveImageResize(event) {
+    const selection = state.liveCompatSelection;
+    if (state.editingEngine !== "live" || state.mode !== "edit" || !selection?.isImage || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const startPercent = Math.max(1, Math.min(100, Number(selection.styles?.widthPercent) || 100));
+    const parentWidth = Math.max(1, Number(selection.styles?.parentContentWidth) || Number(selection.rect?.width) / (startPercent / 100));
+    liveImageResize = {
+      liveId: selection.liveId,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startPercent,
+      parentWidth,
+      startRect: { ...selection.rect },
+    };
+    ui.liveImageResizeHandle.classList.add("is-resizing");
+    // Keep pointer capture in the host while the handle moves over the iframe.
+    ui.liveCompatFrame.style.pointerEvents = "none";
+    try { ui.liveImageResizeHandle.setPointerCapture(event.pointerId); } catch {}
+    postLiveCompat("beautylab-live-resize-image", { liveId: selection.liveId, phase: "start" });
+  }
+
+  function moveLiveImageResize(event) {
+    if (!liveImageResize || event.pointerId !== liveImageResize.pointerId) return;
+    event.preventDefault();
+    const percent = liveResizePercent(event);
+    updateLiveResizePreview(percent);
+    postLiveCompat("beautylab-live-resize-image", { liveId: liveImageResize.liveId, phase: "move", widthPercent: percent });
+  }
+
+  function finishLiveImageResize(event, cancel = false) {
+    if (!liveImageResize || event.pointerId !== liveImageResize.pointerId) return;
+    event.preventDefault();
+    const context = liveImageResize;
+    const percent = liveResizePercent(event);
+    liveImageResize = null;
+    ui.liveCompatFrame.style.pointerEvents = "";
+    ui.liveImageResizeHandle.classList.remove("is-resizing");
+    try { ui.liveImageResizeHandle.releasePointerCapture(context.pointerId); } catch {}
+    postLiveCompat("beautylab-live-resize-image", {
+      liveId: context.liveId,
+      phase: cancel ? "cancel" : "end",
+      widthPercent: percent,
+    });
+  }
+
+  function liveTextLabel(entry, index, total, selection) {
+    if (entry.kind === "placeholder") return i18n.t("占位文字");
+    if (entry.kind === "value") return i18n.t("当前值");
+    if (total === 1 && selection.tag === "button") return i18n.t("按钮文字");
+    return i18n.t(`文字 ${index + 1}`);
+  }
+
+  function renderLiveTextTools(selection) {
+    const entries = selection?.textEntries || [];
+    ui.liveTextSection.hidden = entries.length === 0;
+    ui.liveTextCount.textContent = i18n.t(`${entries.length} 处`);
+    ui.liveTextList.replaceChildren();
+    entries.forEach((entry, index) => {
+      const field = document.createElement("div");
+      field.className = "text-content-field";
+      const label = document.createElement("label");
+      const inputId = `live-text-${index}`;
+      label.htmlFor = inputId;
+      const labelName = document.createElement("span");
+      labelName.textContent = liveTextLabel(entry, index, entries.length, selection);
+      const source = document.createElement("span");
+      source.textContent = `<${entry.tag || selection.tag}>`;
+      label.append(labelName, source);
+      const input = document.createElement("textarea");
+      input.id = inputId;
+      input.className = "text-content-input";
+      input.rows = String(entry.value || "").length > 70 || String(entry.value || "").includes("\n") ? 3 : 1;
+      input.value = String(entry.value || "");
+      let committed = input.value;
+      let timer = null;
+      const commit = () => {
+        window.clearTimeout(timer);
+        timer = null;
+        if (input.value === committed) return;
+        committed = input.value;
+        postLiveCompat("beautylab-live-apply-text", { liveId: selection.liveId, key: entry.key, value: input.value });
+      };
+      input.addEventListener("input", () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(commit, 180);
+      });
+      input.addEventListener("blur", commit);
+      input.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") input.blur();
+      });
+      field.append(label, input);
+      ui.liveTextList.append(field);
+    });
+  }
+
+  function renderLiveSelectTools(selection) {
+    const options = selection?.selectOptions || [];
+    const kind = selection?.selectKind || "";
+    const custom = kind === "custom";
+    ui.liveSelectSection.hidden = !kind;
+    ui.liveSelectTitle.textContent = i18n.t(custom ? "自定义下拉选项" : "下拉选项");
+    ui.liveSelectDescription.textContent = i18n.t(custom ? "同步修改显示文字与实际值" : "增加、删除或修改每个选项");
+    ui.liveSelectCount.textContent = i18n.t(`${options.length} 项`);
+    ui.liveSelectEmpty.textContent = i18n.t(custom ? "当前自定义下拉框没有静态选项" : "当前下拉框没有选项");
+    ui.liveSelectEmpty.hidden = options.length > 0;
+    ui.liveSelectList.hidden = options.length === 0;
+    ui.liveSelectRuntimeNote.hidden = !custom;
+    ui.liveRemoveOptionButton.disabled = options.length === 0;
+    ui.liveSelectList.replaceChildren();
+    options.forEach((option) => {
+      const row = document.createElement("div");
+      row.className = "select-option-row";
+      row.dataset.optionIndex = String(option.index);
+      const main = document.createElement("div");
+      main.className = "select-option-main";
+      const number = document.createElement("span");
+      number.className = "select-option-index";
+      number.textContent = String(option.index + 1).padStart(2, "0");
+      const labelField = document.createElement("label");
+      labelField.className = "select-option-field select-option-label-field";
+      const labelCaption = document.createElement("span");
+      labelCaption.textContent = i18n.t("显示文字");
+      const labelInput = document.createElement("input");
+      labelInput.type = "text";
+      labelInput.value = option.label;
+      labelInput.setAttribute("aria-label", `${i18n.t("显示文字")} ${option.index + 1}`);
+      labelField.append(labelCaption, labelInput);
+      main.append(number, labelField);
+      const valueField = document.createElement("label");
+      valueField.className = "select-option-field select-option-value-field";
+      const valueCaption = document.createElement("span");
+      valueCaption.textContent = i18n.t("值");
+      const valueInput = document.createElement("input");
+      valueInput.type = "text";
+      valueInput.value = option.value;
+      valueInput.setAttribute("aria-label", `${i18n.t("值")} ${option.index + 1}`);
+      valueField.append(valueCaption, valueInput);
+      const actions = document.createElement("div");
+      actions.className = "select-option-actions";
+      const defaultButton = document.createElement("button");
+      defaultButton.type = "button";
+      defaultButton.className = `mini-icon-button default-option-button${option.selected ? " active" : ""}`;
+      const defaultTitle = custom
+        ? option.selected ? "取消默认勾选" : option.inputType === "radio" ? "设为默认项" : "设为默认勾选"
+        : option.selected ? "取消默认项" : "设为默认项";
+      defaultButton.title = i18n.t(defaultTitle);
+      defaultButton.setAttribute("aria-label", `${defaultButton.title} ${option.index + 1}`);
+      defaultButton.setAttribute("aria-pressed", String(option.selected));
+      const defaultIcon = custom
+        ? option.inputType === "radio" ? "circle-dot" : "square-check-big"
+        : "circle-check";
+      defaultButton.innerHTML = `<i data-lucide="${defaultIcon}"></i>`;
+      const divider = document.createElement("span");
+      divider.className = "option-action-divider";
+      divider.setAttribute("aria-hidden", "true");
+      const actionButton = (action, icon, title, disabled = false, danger = false) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `mini-icon-button${danger ? " danger-on-hover" : ""}`;
+        button.title = i18n.t(title);
+        button.setAttribute("aria-label", `${button.title} ${option.index + 1}`);
+        button.disabled = disabled;
+        button.innerHTML = `<i data-lucide="${icon}"></i>`;
+        button.addEventListener("click", () => postLiveCompat("beautylab-live-select-action", { liveId: selection.liveId, action, index: option.index }));
+        return button;
+      };
+      const commitInput = (input, action) => {
+        input.addEventListener("change", () => postLiveCompat("beautylab-live-select-action", { liveId: selection.liveId, action, index: option.index, value: input.value }));
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") input.blur();
+        });
+      };
+      commitInput(labelInput, "label");
+      commitInput(valueInput, "value");
+      defaultButton.addEventListener("click", () => postLiveCompat("beautylab-live-select-action", { liveId: selection.liveId, action: "selected", index: option.index }));
+      actions.append(
+        defaultButton,
+        divider,
+        actionButton("up", "arrow-up", "上移选项", option.index === 0),
+        actionButton("down", "arrow-down", "下移选项", option.index === options.length - 1),
+        actionButton("duplicate", "copy", "复制选项"),
+        actionButton("remove", "trash-2", "删除选项", false, true),
+      );
+      row.append(main, valueField, actions);
+      ui.liveSelectList.append(row);
+    });
+    refreshIcons(ui.liveSelectSection);
+  }
+
+  function updateLiveStyleFields(selection) {
+    const styles = selection?.styles || {};
+    const values = { ...(styles.values || {}) };
+    values.color = colorToHex(values.color || styles.color);
+    values["background-color"] = colorToHex(values["background-color"] || styles.backgroundColor, "#ffffff");
+    values["border-color"] = colorToHex(values["border-color"] || styles.borderColor, "#000000");
+    ui.liveStyleFields.forEach((field) => {
+      const value = values[field.dataset.liveStyle];
+      if (field.matches("select") && value != null && !Array.from(field.options).some((option) => option.value === String(value))) {
+        field.querySelector("option[data-live-current]")?.remove();
+        const option = document.createElement("option");
+        option.value = String(value);
+        option.textContent = String(value);
+        option.dataset.liveCurrent = "";
+        field.prepend(option);
+      }
+      if (value !== undefined && value !== null) field.value = String(value);
+      field.disabled = !selection;
+    });
+    ui.liveColorValues.forEach((output) => {
+      const value = values[output.dataset.liveColorValue];
+      if (value) output.textContent = String(value).toUpperCase();
+    });
+    ui.liveStyleButtons.forEach((button) => {
+      const active = String(values[button.dataset.liveStyleButton] || "") === button.dataset.liveStyleValue;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = !selection;
+    });
+  }
+
+  function renderLiveSelectionUI() {
+    const selection = state.liveCompatSelection;
+    const hasSelection = Boolean(selection);
+    ui.noSelection.hidden = hasSelection;
+    ui.rightSidebar.classList.toggle("no-active-selection", !hasSelection);
+    ui.liveCompatTools.hidden = !hasSelection;
+    ui.selectedComponentName.textContent = liveComponentLabel(selection);
+    ui.selectionPath.textContent = hasSelection ? selection.path : "点击元素开始编辑";
+    ui.liveSelectionTag.textContent = hasSelection ? `<${selection.tag}>` : "--";
+    ui.duplicateButton.disabled = !hasSelection;
+    ui.deleteButton.disabled = !hasSelection;
+    ui.moveUpButton.disabled = !hasSelection || !selection?.canMoveUp;
+    ui.moveDownButton.disabled = !hasSelection || !selection?.canMoveDown;
+    const textSelected = Boolean(selection?.textEntries?.length);
+    ui.boldButton.disabled = !textSelected;
+    ui.alignButtons.forEach((button) => (button.disabled = !textSelected));
+    renderLiveTextTools(selection);
+    renderLiveSelectTools(selection);
+    ui.liveImageSection.hidden = !selection?.isImage;
+    ui.liveCanvasSection.hidden = !selection?.isCanvas;
+    if (selection?.isImage) {
+      const width = Math.max(1, Math.min(100, Number(selection.styles?.widthPercent) || 100));
+      ui.liveImageWidthSlider.value = String(Math.round(width));
+      ui.liveImageWidthOutput.value = `${Math.round(width)}%`;
+      ui.liveImageWidthOutput.textContent = `${Math.round(width)}%`;
+      ui.liveImageWidthPresets.forEach((button) => {
+        const active = Number(button.dataset.liveImageWidth) === Math.round(width);
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+      });
+    }
+    updateLiveStyleFields(selection);
+    syncLiveLayerSelection();
+    renderLiveSelectionToolbar(selection);
+    renderLiveImageResizeHandle(selection);
+    objectController?.refresh();
+  }
+
   function updateSelectionUI() {
+    if (state.editingEngine === "live") {
+      renderLiveSelectionUI();
+      return;
+    }
     const selected = getSelected();
     const hasSelection = Boolean(selected);
     ui.noSelection.hidden = hasSelection;
@@ -1006,15 +1605,29 @@
     ui.alignButtons.forEach((button) => (button.disabled = !textSelected));
 
     const tag = selected ? (selected.get("tagName") || "").toLowerCase() : "";
+    if (tag === "img") ensureImageResizable(selected);
     renderTextTools(selected);
     selectOptionsController?.update(selected);
     ui.imageTools.hidden = tag !== "img";
     if (tag === "img") updateImageControls(selected);
     ui.canvasTools.hidden = tag !== "canvas";
+    objectController?.refresh();
   }
 
   function updateWarnings() {
-    const warnings = state.document?.warnings || [];
+    const warnings = [...(state.document?.warnings || [])];
+    if (!ui.continueExportButton.hidden && state.editingEngine === "live" && state.exportMode === "static") {
+      const incomplete = state.liveCompatSnapshot?.staticWarnings || [];
+      warnings.push({
+        level: incomplete.length ? "warning" : "info", icon: incomplete.length ? "triangle-alert" : "image",
+        title: incomplete.length ? "静态导出有未能保留的内容" : "静态画面",
+        detail: incomplete.length ? incomplete.map((detail) => {
+          const canvas = /^Canvas (\d+):/.exec(detail);
+          const embedded = /^(\d+) embedded/.exec(detail);
+          return canvas ? `Canvas ${canvas[1]} 无法转为图片` : embedded ? `${embedded[1]} 个嵌入页面或对象无法转为图片` : detail;
+        }).map((detail) => i18n.t(detail)).join("; ") : "脚本与按钮交互将停用；Canvas 将转为图片，嵌入页面无法转换。",
+      });
+    }
     ui.warningCount.textContent = String(warnings.length);
     const risky = warnings.filter((warning) => warning.level === "warning").length;
     ui.warningSummary.textContent = risky ? `${risky} 项需要检查` : "兼容性良好";
@@ -1079,83 +1692,51 @@
     frameDocument.head.insertBefore(fragment, anchor);
   }
 
-  function requestRuntimeSnapshot(parsed) {
-    if (!parsed.scripts.length) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const frame = document.createElement("iframe");
-      frame.className = "runtime-snapshot-frame";
-      frame.setAttribute("sandbox", "allow-scripts");
-      frame.setAttribute("aria-hidden", "true");
-      let settled = false;
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        window.removeEventListener("message", receive);
-        frame.remove();
-        resolve(result);
-      };
-      const receive = (event) => {
-        if (event.source !== frame.contentWindow || event.data?.type !== "beautylab-runtime-snapshot" || event.data?.token !== token) return;
-        finish({
-          body: String(event.data.body || ""),
-          css: String(event.data.css || ""),
-          bodyAttributes: event.data.bodyAttributes && typeof event.data.bodyAttributes === "object" ? event.data.bodyAttributes : {},
-          runtimeState: event.data.runtimeState && typeof event.data.runtimeState === "object" ? event.data.runtimeState : null,
-          error: String(event.data.error || ""),
-        });
-      };
-      window.addEventListener("message", receive);
-      document.body.append(frame);
-      frame.srcdoc = FrameEditIO.createRuntimeSnapshotDocument(parsed, token);
-      window.setTimeout(() => finish(null), 7000);
-    });
+  function refreshCanvasStyles() {
+    FrameEditIO.injectCanvasStyles(editor.Canvas.getDocument(), state.document);
+    if (state.document.runtimeCss && !state.document.runtimeStylesheets) injectRawCanvasCss(state.document.runtimeCss);
   }
 
-  async function loadDocument(html, fileName = "粘贴的页面.html", fileHandle = null, { editableFileName = false } = {}) {
-    await ensureEditorReady();
+  async function loadDocument(html, fileName = "粘贴的页面.html", fileHandle = null, { editableFileName = false, draftId, viewSettings } = {}) {
+    if (state.document && !state.loading && !draftId) {
+      const saved = await draftController.flush();
+      if (!saved.ok) throw saved.error || new Error("当前草稿未保存，未切换文件。");
+    }
+    const recovered = BeautyLabRuntimeEdits.extract(html);
+    if (recovered) html = recovered.baseHtml;
+    const sourceView = new DOMParser().parseFromString(html, "text/html").querySelector('meta[name="beautylab-view"]');
+    if (!viewSettings && !recovered?.settings && sourceView) {
+      try { viewSettings = JSON.parse(sourceView.content); } catch {}
+    }
     let parsed;
     try {
       parsed = FrameEditIO.parseHtml(html, fileName);
     } catch (error) {
       throw new Error(error.message || "HTML 解析失败。");
     }
+    state.documentEpoch += 1;
+    const loadEpoch = state.documentEpoch;
+    state.revision = 0;
+    if (state.editingEngine === "live") destroyLiveCompatShell();
+    await ensureEditorReady();
+    if (loadEpoch !== state.documentEpoch) return;
 
-    if (parsed.scripts.length) {
-      const runtimeSnapshot = await requestRuntimeSnapshot(parsed);
-      if (runtimeSnapshot?.body) {
-        const snapshot = FrameEditIO.mergeRuntimeSnapshot(parsed, runtimeSnapshot);
-        if (snapshot.snapshotApplied) {
-          parsed = {
-            ...parsed,
-            bodyHtml: snapshot.bodyHtml,
-            css: [parsed.css, snapshot.css && `/* Isolated runtime snapshot styles */\n${snapshot.css}`].filter(Boolean).join("\n\n"),
-            bodyAttributes: snapshot.bodyAttributes,
-            warnings: [
-              ...parsed.warnings,
-              {
-                level: "info",
-                icon: "scan-eye",
-                title: "已载入脚本运行后的可编辑页面",
-                detail: "普通 DOM 文字、图片和样式可以继续修改；Canvas、Shadow DOM 及脚本反复重建的内容仍需在最终预览中检查。",
-              },
-            ],
-          };
-        }
-      } else {
-        parsed = {
-          ...parsed,
-          warnings: [
-            ...parsed.warnings,
-            {
-              level: "warning",
-              icon: "triangle-alert",
-              title: "页面脚本未在限定时间内完成",
-              detail: "编辑器已载入原始 DOM。请检查网络依赖，或在最终预览中确认需要较长时间初始化的内容。",
-            },
-          ],
-        };
-      }
+    const autoOnlineCompatibility = parsed.scripts.length > 0 || parsed.counts.inlineHandlers > 0 || parsed.counts.javascriptLinks > 0 || Boolean(recovered?.edits?.transactions?.length);
+    if (autoOnlineCompatibility) {
+      parsed = {
+        ...parsed,
+        warnings: [
+          ...parsed.warnings,
+          {
+            level: "info",
+            icon: "wifi",
+            title: "已自动启用联网兼容画布",
+            detail: parsed.counts.externalResources
+              ? "页面将联网加载外部资源，并从原始 DOM 持续运行脚本和动效。"
+              : "页面将从原始 DOM 持续运行脚本和动效，普通文字和样式可直接修改。",
+          },
+        ],
+      };
     }
 
     state.loading = true;
@@ -1164,20 +1745,35 @@
     editor.setComponents(parsed.bodyHtml);
     editor.setStyle(parsed.css);
     applyBodyAttributes(parsed.bodyAttributes);
-    injectRawCanvasCss(parsed.css);
-    injectCanvasStylesheetLinks(parsed.stylesheetLinks, parsed.baseHref);
+    FrameEditIO.injectCanvasStyles(editor.Canvas.getDocument(), parsed);
     state.document = parsed;
     state.document.runtimeCss = "";
     state.document.runtimeRestore = null;
+    state.document.runtimeStylesheets = null;
+    state.recoveredEdits = recovered?.edits || null;
+    state.liveSourceHtml = null;
     state.modifiedSelectIds.clear();
     state.previewHistory = [];
     state.previewHistoryIndex = -1;
     state.previewEntrySnapshot = null;
     state.previewInteracted = false;
     state.previewReady = false;
+    state.editingEngine = "standard";
+    state.hasAuthorEdits = false;
+    state.liveCompatSnapshot = null;
+    state.liveCompatSelection = null;
+    state.liveCompatInteracted = false;
+    state.liveCompatHistory = { canUndo: false, canRedo: false };
+    state.liveCompatResources = null;
+    state.liveCompatLayers = [];
     state.mode = "edit";
-    ui.appShell.classList.remove("preview-mode");
+    ui.appShell.classList.remove("preview-mode", "live-compat-mode", "live-compat-preview");
     ui.interactivePreview.hidden = true;
+    ui.liveCompatStage.hidden = true;
+    ui.liveCompatFrame.srcdoc = "";
+    ui.liveSelectionToolbar.hidden = true;
+    ui.liveImageResizeHandle.hidden = true;
+    setLayersPanelMode(false);
     ui.previewFrame.srcdoc = "";
     ui.editModeButton.classList.add("active");
     ui.previewModeButton.classList.remove("active");
@@ -1187,11 +1783,18 @@
     state.documentNameEditable = editableFileName;
     ui.documentName.textContent = parsed.fileName;
     setDocumentAvailability(true);
+    setLayersCollapsed(true);
+    canvasView.reset();
+    canvasView.restoreSettings(viewSettings || recovered?.settings);
+    draftController.setDocument({ id: draftId, name: parsed.fileName });
+    updateLiveCompatMenu();
     updateWarnings();
     editor.UndoManager.clear();
     updateUndoRedo();
     updateSelectionUI();
-    window.setTimeout(() => {
+    await new Promise((resolve, reject) => window.setTimeout(async () => {
+      if (loadEpoch !== state.documentEpoch || state.document !== parsed) { resolve(); return; }
+      try {
       editor.UndoManager.clear();
       editor.UndoManager.start();
       editor.clearDirtyCount?.();
@@ -1200,13 +1803,33 @@
       setDirty(false);
       installCanvasSafety();
       editor.refresh();
-    }, 500);
-    showToast(`已载入 ${parsed.fileName}`);
+      if (autoOnlineCompatibility && state.document === parsed && state.editingEngine === "standard") {
+        await enableLiveCompat({ automatic: true });
+      }
+      draftController.schedule();
+      resolve();
+      } catch (error) { reject(error); }
+    }, 500));
+    if (loadEpoch === state.documentEpoch) showToast(`已载入 ${parsed.fileName}`);
   }
 
-  function buildOutput() {
+  function buildOutput({ mode = state.exportMode } = {}) {
     flushPendingTextEdits();
     if (!state.document) throw new Error("请先打开或粘贴 HTML。");
+    if (state.editingEngine === "live") {
+      const snapshot = state.liveCompatSnapshot;
+      if (!snapshot?.bodyHtml) throw new Error("实时页面尚未完成同步，请稍后重试。");
+      if (mode !== "static") {
+        if (!state.liveSourceHtml || !snapshot.authorEdits) throw new Error("编辑记录尚未同步，请稍后重试。");
+        if (snapshot.authorEdits.pendingReplay) throw new Error("页面仍在恢复动态内容，请等待载入完成。");
+        return BeautyLabRuntimeEdits.exportHtml(state.liveSourceHtml, snapshot.authorEdits, canvasView.getSettings());
+      }
+      return outputWithView(FrameEditIO.createStaticOutputDocument(state.document, snapshot));
+    }
+    if (!state.hasAuthorEdits) {
+      const authorOutput = FrameEditIO.createAuthorOutputDocument(state.document);
+      if (authorOutput) return outputWithView(authorOutput);
+    }
     const editedCss = editor.getCss({ avoidProtected: true });
     const editedHtml = editor.getHtml();
     const bodyAttributes = { ...editor.DomComponents.getWrapper().getAttributes() };
@@ -1221,7 +1844,7 @@
     const runtimeRestore = state.document.runtimeRestore
       ? FrameEditIO.createRuntimeRestoreState(editedHtml, bodyAttributes, state.document.runtimeRestore.interaction)
       : null;
-    return FrameEditIO.createOutputDocument(
+    return outputWithView(FrameEditIO.createOutputDocument(
       { ...state.document, bodyAttributes },
       editedHtml,
       [
@@ -1230,7 +1853,17 @@
         `/* Edward's HTML Beauty Lab visual overrides */\n${editedCss}`,
       ].filter(Boolean).join("\n\n"),
       { selectOverrides, runtimeRestore },
-    );
+    ));
+  }
+
+  function outputWithView(html) {
+    const node = new DOMParser().parseFromString(html, "text/html");
+    node.querySelector('meta[name="beautylab-view"]')?.remove();
+    const meta = node.createElement("meta");
+    meta.name = "beautylab-view";
+    meta.content = JSON.stringify(canvasView.getSettings());
+    node.head.append(meta);
+    return `${state.document.originalDoctype || "<!doctype html>"}\n${node.documentElement.outerHTML}`;
   }
 
   function outputFileName() {
@@ -1239,7 +1872,9 @@
   }
 
   async function downloadOutput() {
+    const epoch = state.documentEpoch;
     if (!await ensurePreviewSyncedForAction()) return;
+    if (epoch !== state.documentEpoch) return;
     let html;
     try {
       html = buildOutput();
@@ -1247,6 +1882,7 @@
       showToast(error.message, "error");
       return;
     }
+    const revision = state.revision;
     if (state.lastExportUrl) URL.revokeObjectURL(state.lastExportUrl);
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -1257,7 +1893,7 @@
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
-    setDirty(false);
+    if (revision === state.revision) setDirty(false);
     showToast(`已生成 ${outputFileName()}`);
   }
 
@@ -1280,6 +1916,7 @@
     ui.previewModeButton.classList.toggle("active", preview);
     ui.editModeButton.setAttribute("aria-pressed", String(!preview));
     ui.previewModeButton.setAttribute("aria-pressed", String(preview));
+    canvasView.refresh();
     if (!preview) window.setTimeout(() => editor?.refresh(), 0);
   }
 
@@ -1330,10 +1967,10 @@
     return allowedOrigin && event.source === ui.previewFrame.contentWindow && event.data?.token === state.previewToken;
   }
 
-  function requestPreviewCapture() {
+  function requestFrameCapture(frame, token, timeoutMessage = "同步超过 4 秒，请重试。") {
     return new Promise((resolve, reject) => {
-      if (state.mode !== "preview" || !state.previewToken || !ui.previewFrame.contentWindow) {
-        reject(new Error("交互预览尚未准备好。"));
+      if (!token || !frame?.contentWindow) {
+        reject(new Error("交互页面尚未准备好。"));
         return;
       }
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1348,7 +1985,8 @@
       };
       const receive = (event) => {
         const message = event.data || {};
-        if (!validPreviewMessage(event) || message.type !== "beautylab-preview-capture-result" || message.requestId !== requestId) return;
+        const allowedOrigin = event.origin === "null" || event.origin === window.location.origin;
+        if (!allowedOrigin || event.source !== frame.contentWindow || message.token !== token || message.type !== "beautylab-preview-capture-result" || message.requestId !== requestId) return;
         if (message.error) {
           finish(new Error(String(message.error)));
           return;
@@ -1356,19 +1994,243 @@
         finish(null, {
           body: String(message.body || ""),
           css: String(message.css || ""),
+          stylesheets: Array.isArray(message.stylesheets) ? message.stylesheets : null,
+          authorEdits: message.authorEdits && typeof message.authorEdits === "object" ? message.authorEdits : null,
+          staticBody: typeof message.staticBody === "string" ? message.staticBody : null,
+          staticWarnings: Array.isArray(message.staticWarnings) ? message.staticWarnings : [],
           bodyAttributes: message.bodyAttributes && typeof message.bodyAttributes === "object" ? message.bodyAttributes : {},
           runtimeState: message.runtimeState && typeof message.runtimeState === "object" ? message.runtimeState : null,
           interaction: message.interaction && typeof message.interaction === "object" ? message.interaction : null,
         });
       };
-      const timer = window.setTimeout(() => finish(new Error("同步超过 4 秒，请重试。")), 4000);
+      const timer = window.setTimeout(() => finish(new Error(timeoutMessage)), 4000);
       window.addEventListener("message", receive);
-      ui.previewFrame.contentWindow.postMessage({
+      frame.contentWindow.postMessage({
         type: "beautylab-preview-capture-request",
-        token: state.previewToken,
+        token,
         requestId,
       }, "*");
     });
+  }
+
+  function requestPreviewCapture() {
+    if (state.mode !== "preview") return Promise.reject(new Error("交互预览尚未准备好。"));
+    return requestFrameCapture(ui.previewFrame, state.previewToken);
+  }
+
+  function validLiveCompatMessage(event) {
+    const allowedOrigin = event.origin === "null" || event.origin === window.location.origin;
+    return allowedOrigin && event.source === ui.liveCompatFrame.contentWindow && event.data?.token === state.liveCompatToken;
+  }
+
+  function postLiveCompat(type, payload = {}) {
+    if (state.editingEngine !== "live" || !state.liveCompatToken || !ui.liveCompatFrame.contentWindow) return;
+    ui.liveCompatFrame.contentWindow.postMessage({ type, token: state.liveCompatToken, ...payload }, "*");
+  }
+
+  function updateLiveCompatRuntimeStatus() {
+    const resources = state.liveCompatResources;
+    if (resources?.failed) {
+      ui.liveCompatStatusText.textContent = `${resources.failed} ${i18n.t("个网络资源加载失败，请检查网络后重新开启兼容模式")}`;
+      return;
+    }
+    if (resources?.total && resources.pending > 0) {
+      ui.liveCompatStatusText.textContent = `${i18n.t("正在联网加载外部资源")} ${resources.loaded}/${resources.total}…`;
+      return;
+    }
+    ui.liveCompatStatusText.textContent = state.mode === "preview"
+      ? "脚本持续运行，可操作页面中的按钮和筛选器"
+      : i18n.t("单击选择，双击文字直接修改；按住 Ctrl/Cmd 点击可运行页面按钮");
+  }
+
+  function setLiveCompatMode(mode) {
+    if (state.editingEngine !== "live") return;
+    const preview = mode === "preview";
+    state.mode = preview ? "preview" : "edit";
+    ui.appShell.classList.toggle("live-compat-preview", preview);
+    ui.editModeButton.classList.toggle("active", !preview);
+    ui.previewModeButton.classList.toggle("active", preview);
+    ui.editModeButton.setAttribute("aria-pressed", String(!preview));
+    ui.previewModeButton.setAttribute("aria-pressed", String(preview));
+    postLiveCompat("beautylab-live-set-mode", { mode: state.mode });
+    canvasView.refresh();
+    if (preview) {
+      ui.liveSelectionToolbar.hidden = true;
+      ui.liveImageResizeHandle.hidden = true;
+      ui.documentState.textContent = "实时预览模式";
+      updateLiveCompatRuntimeStatus();
+    } else {
+      ui.documentState.textContent = state.dirty ? "有未保存修改" : "实时兼容模式";
+      updateLiveCompatRuntimeStatus();
+      renderLiveSelectionUI();
+      window.setTimeout(() => postLiveCompat("beautylab-live-request-selection"), 0);
+    }
+  }
+
+  async function captureLiveCompatSnapshot({ quiet = false } = {}) {
+    if (state.editingEngine !== "live") return null;
+    const epoch = state.documentEpoch;
+    const token = state.liveCompatToken;
+    if (!quiet) {
+      ui.documentState.textContent = "正在同步实时页面…";
+      ui.liveCompatStatusText.textContent = "正在读取当前运行时 DOM…";
+    }
+    const result = await requestFrameCapture(ui.liveCompatFrame, state.liveCompatToken, "实时页面同步超过 4 秒，请重试。");
+    if (epoch !== state.documentEpoch || token !== state.liveCompatToken) throw new Error("文件已切换，请重试当前操作。");
+    if (!result.body.trim()) throw new Error("实时页面没有返回可编辑内容。");
+    const merged = FrameEditIO.mergeRuntimeSnapshot(state.document, result);
+    if (!merged.snapshotApplied) throw new Error("无法读取当前实时页面。");
+    state.liveCompatSnapshot = {
+      ...merged,
+      authorEdits: result.authorEdits || null,
+      staticBody: result.staticBody || null,
+      staticWarnings: result.staticWarnings || [],
+      interaction: result.interaction || merged.runtimeState?.interaction || null,
+      runtimeState: merged.runtimeState ? { ...merged.runtimeState, interaction: result.interaction || merged.runtimeState.interaction || null } : null,
+    };
+    if (!quiet) {
+      ui.documentState.textContent = state.dirty ? "有未保存修改" : state.mode === "preview" ? "实时预览模式" : "实时兼容模式";
+      ui.liveCompatStatusText.textContent = state.mode === "preview"
+        ? "脚本持续运行，可操作页面中的按钮和筛选器"
+        : "当前实时页面已同步，可继续修改";
+    }
+    return state.liveCompatSnapshot;
+  }
+
+  async function ensureLiveCompatCapturedForAction() {
+    if (state.editingEngine !== "live") return true;
+    try {
+      await captureLiveCompatSnapshot();
+      return true;
+    } catch (error) {
+      showToast(error.message || "实时页面同步失败。", "error");
+      ui.documentState.textContent = "实时页面同步失败";
+      ui.liveCompatStatusText.textContent = "同步失败，请稍后重试或关闭实时兼容模式";
+      return false;
+    }
+  }
+
+  function destroyLiveCompatShell() {
+    ui.liveCompatFrame.srcdoc = "";
+    ui.liveCompatStage.hidden = true;
+    ui.appShell.classList.remove("live-compat-mode", "live-compat-preview");
+    state.editingEngine = "standard";
+    state.liveCompatToken = "";
+    state.liveCompatReady = false;
+    state.liveCompatSelection = null;
+    state.liveCompatSnapshot = null;
+    state.liveCompatEntrySnapshot = null;
+    state.liveCompatInteracted = false;
+    state.liveCompatHistory = { canUndo: false, canRedo: false };
+    state.liveCompatResources = null;
+    state.liveCompatLayers = [];
+    state.mode = "edit";
+    ui.liveCompatTools.hidden = true;
+    ui.liveSelectionToolbar.hidden = true;
+    ui.liveImageResizeHandle.hidden = true;
+    setLayersPanelMode(false);
+    ui.liveTextList.replaceChildren();
+    ui.liveSelectList.replaceChildren();
+    ui.editModeButton.classList.add("active");
+    ui.previewModeButton.classList.remove("active");
+    ui.editModeButton.setAttribute("aria-pressed", "true");
+    ui.previewModeButton.setAttribute("aria-pressed", "false");
+    ui.toggleLayersButton.disabled = !state.document;
+    updateLiveCompatMenu();
+    canvasView.refresh();
+  }
+
+  async function enableLiveCompat({ automatic = false } = {}) {
+    if (!state.document || state.editingEngine === "live") return false;
+    if (state.mode === "preview" && !await syncPreviewToEditor()) return false;
+    flushPendingTextEdits();
+    let output;
+    try {
+      output = buildOutput();
+    } catch (error) {
+      showToast(error.message || "无法准备实时页面。", "error");
+      return false;
+    }
+
+    state.liveSourceHtml = output;
+    output = BeautyLabRuntimeEdits.prepareHtml(output, state.recoveredEdits || {});
+    state.recoveredEdits = null;
+    state.liveCompatEntrySnapshot = captureEditorState();
+    state.liveCompatToken = newPreviewToken();
+    state.liveCompatReady = false;
+    state.liveCompatSelection = null;
+    state.liveCompatSnapshot = null;
+    state.liveCompatInteracted = false;
+    state.liveCompatHistory = { canUndo: false, canRedo: false };
+    state.liveCompatResources = null;
+    state.liveCompatLayers = [];
+    state.editingEngine = "live";
+    state.mode = "edit";
+    ui.appShell.classList.remove("preview-mode");
+    ui.appShell.classList.add("live-compat-mode");
+    ui.appShell.classList.remove("live-compat-preview");
+    ui.interactivePreview.hidden = true;
+    ui.previewFrame.srcdoc = "";
+    ui.liveCompatStage.hidden = false;
+    canvasView.refresh();
+    ui.toggleLayersButton.disabled = false;
+    setLayersPanelMode(true);
+    ui.liveCompatStatusText.textContent = state.document.counts.externalResources
+      ? "正在联网加载外部资源…"
+      : "正在准备联网脚本页面…";
+    ui.documentState.textContent = "正在进入实时兼容模式…";
+    const epoch = state.documentEpoch;
+    const token = state.liveCompatToken;
+    await new Promise((resolve) => {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
+    });
+    if (state.editingEngine !== "live" || epoch !== state.documentEpoch || token !== state.liveCompatToken) return false;
+    ui.liveCompatFrame.srcdoc = BeautyLabLiveCompat.createDocument(output, state.liveCompatToken, {
+      scriptIds: state.document.scripts.map((entry) => entry.id),
+    });
+    updateLiveCompatMenu();
+    updateUndoRedo();
+    renderLiveSelectionUI();
+    showToast(automatic
+      ? "已自动进入联网兼容模式，脚本和动效将持续运行"
+      : "已进入实时兼容模式，脚本将在隔离画布中持续运行");
+    return true;
+  }
+
+  async function disableLiveCompat() {
+    if (state.editingEngine !== "live") return true;
+    let merged;
+    try {
+      merged = await captureLiveCompatSnapshot();
+    } catch (error) {
+      showToast(error.message || "实时页面同步失败，仍保留在当前模式。", "error");
+      return false;
+    }
+
+    const saved = await draftController.flush();
+    if (!saved.ok) return false;
+    const output = FrameEditIO.createStaticOutputDocument(state.document, merged);
+    const name = state.document.fileName.replace(/\.html?$/i, "-静态.html");
+    await loadDocument(output, name, null, { editableFileName: true, viewSettings: canvasView.getSettings() });
+    setDirty(true);
+    showToast("已创建静态副本，交互版本保留在草稿中");
+    return true;
+  }
+
+  async function toggleLiveCompat() {
+    setMoreMenuOpen(false);
+    if (!state.document) {
+      showToast("请先打开或粘贴 HTML。", "warning");
+      return;
+    }
+    ui.liveCompatButton.disabled = true;
+    try {
+      if (state.editingEngine === "live") withDirtyConfirmation(disableLiveCompat, "创建静态副本？", "副本保留当前画面，脚本和按钮交互将停用。原交互版本保留在本地草稿中。", true);
+      else await enableLiveCompat();
+    } finally {
+      ui.liveCompatButton.disabled = !state.document;
+      updateLiveCompatMenu();
+    }
   }
 
   function closeInteractivePreview() {
@@ -1397,6 +2259,7 @@
 
   async function syncPreviewToEditor() {
     if (state.mode !== "preview") return true;
+    if (!state.previewInteracted) { closeInteractivePreview(); return true; }
     if (state.previewSyncing) return false;
     state.previewSyncing = true;
     ui.modeSwitch.classList.add("syncing");
@@ -1415,7 +2278,7 @@
       const merged = FrameEditIO.mergeRuntimeSnapshot(state.document, result);
       if (!merged.snapshotApplied) throw new Error("无法把当前预览转换为可编辑页面。");
       const capturedRuntimeCss = String(merged.css || "").trim();
-      const nextRuntimeCss = capturedRuntimeCss && !state.document.css.includes(capturedRuntimeCss)
+      const nextRuntimeCss = !merged.stylesheets && capturedRuntimeCss && !state.document.css.includes(capturedRuntimeCss)
         ? capturedRuntimeCss
         : before.runtimeCss;
 
@@ -1430,10 +2293,10 @@
         ...state.document,
         bodyAttributes: { ...merged.bodyAttributes },
         runtimeCss: nextRuntimeCss || "",
+        runtimeStylesheets: merged.stylesheets || before.runtimeStylesheets,
         runtimeRestore: merged.runtimeState ? { ...merged.runtimeState, interaction: result.interaction || merged.runtimeState.interaction || null } : null,
       };
-      injectRawCanvasCss([state.document.css, state.document.runtimeCss].filter(Boolean).join("\n\n"));
-      injectCanvasStylesheetLinks(state.document.stylesheetLinks, state.document.baseHref);
+      refreshCanvasStyles();
       const afterBeforeDirty = captureEditorState();
       const changed = JSON.stringify({
         html: before.html,
@@ -1448,6 +2311,7 @@
       });
 
       if (changed) {
+        state.hasAuthorEdits = true;
         setDirty(true);
         const after = captureEditorState();
         pushPreviewHistory(before, after);
@@ -1520,11 +2384,16 @@
   }
 
   async function ensurePreviewSyncedForAction() {
+    if (state.editingEngine === "live") return ensureLiveCompatCapturedForAction();
     return state.mode === "preview" ? syncPreviewToEditor() : true;
   }
 
-  function openWarnings(forExport = false) {
+  async function openWarnings(forExport = false) {
+    if (forExport && state.editingEngine === "live" && !await ensureLiveCompatCapturedForAction()) return;
     ui.continueExportButton.hidden = !forExport;
+    $("#export-mode-control").hidden = !forExport || state.editingEngine !== "live";
+    $("#export-mode-select").value = state.exportMode;
+    updateWarnings();
     ui.warningsDialog.showModal();
   }
 
@@ -1591,14 +2460,17 @@
   }
 
   async function saveCurrentDocument() {
+    const epoch = state.documentEpoch;
     if (!await ensurePreviewSyncedForAction()) return;
+    if (epoch !== state.documentEpoch) return;
     let html;
     try {
-      html = buildOutput();
+      html = buildOutput({ mode: "interactive" });
     } catch (error) {
       showToast(error.message, "error");
       return;
     }
+    const revision = state.revision;
 
     let fileHandle = state.fileHandle;
     try {
@@ -1633,15 +2505,21 @@
         throw error;
       }
 
+      if (epoch !== state.documentEpoch) {
+        showToast(`已保存 ${fileHandle.name || "HTML"}`);
+        return;
+      }
       state.fileHandle = fileHandle;
       if (fileHandle.name) {
         state.document = { ...state.document, fileName: fileHandle.name };
         ui.documentName.textContent = fileHandle.name;
       }
-      setDirty(false);
-      ui.documentState.textContent = "已保存";
+      if (revision === state.revision) {
+        setDirty(false);
+        ui.documentState.textContent = "已保存";
+      }
       updateSaveButton();
-      showToast(`已保存并覆盖 ${state.document.fileName}`);
+      showToast(revision === state.revision ? `已保存并覆盖 ${state.document.fileName}` : "已保存此前版本，最新修改仍未保存");
     } catch (error) {
       if (error?.name !== "AbortError") showToast(error.message || "保存失败，原文件未被修改。", "error");
     }
@@ -1733,7 +2611,7 @@
   function setSelectedImageWidth(value) {
     const selected = getSelected();
     if (!selected || componentTagName(selected) !== "img") return;
-    const percent = Math.min(100, Math.max(10, Math.round(Number(value) || 100)));
+    const percent = Math.min(100, Math.max(1, Math.round(Number(value) || 100)));
     selected.addStyle({ width: `${percent}%`, height: "auto", "max-width": "100%" });
     updateImageControls(selected);
   }
@@ -1774,8 +2652,12 @@
     return match;
   }
 
+  function getInteractiveCanvasDocument() {
+    return editor.Canvas.getFrameEl?.()?.contentDocument || editor.Canvas.getDocument();
+  }
+
   function getCanvasComponent(target) {
-    const frameDocument = editor.Canvas.getDocument();
+    const frameDocument = getInteractiveCanvasDocument();
     let element = target?.nodeType === 1 ? target : target?.parentElement;
     while (element && element !== frameDocument?.documentElement) {
       const mountedComponent = element.__gjsv?.model;
@@ -1787,9 +2669,25 @@
     return null;
   }
 
+  function selectHoveredCanvasComponent(event) {
+    if (state.editingEngine !== "standard" || state.mode !== "edit" || event.button !== 0) return;
+    if (event.target !== editor.Canvas.getFrameEl?.()) return;
+    const component = hoveredCanvasComponent;
+    if (!component || component.is?.("wrapper") || editor.getEditing?.()) return;
+    editor.select(component);
+  }
+
+  function activateHoveredCanvasComponent(event) {
+    if (state.editingEngine !== "standard" || state.mode !== "edit") return;
+    if (event.target !== editor.Canvas.getFrameEl?.()) return;
+    event.preventDefault();
+    activateStandardDoubleClick(hoveredCanvasComponent);
+  }
+
   function installComponentSelection(component) {
     const element = component?.getEl?.();
     if (!element || preparedCanvasElements.get(element) === component) return;
+    ensureImageResizable(component);
     preparedCanvasElements.set(element, component);
     const selectComponent = (event) => {
       if (typeof event.button === "number" && event.button !== 0) return;
@@ -1825,45 +2723,32 @@
   }
 
   function installCanvasSafety() {
-    const frameDocument = editor.Canvas.getDocument();
+    const frameDocument = getInteractiveCanvasDocument();
     const frameRoot = frameDocument?.body;
     if (!frameRoot) return;
     installMountedComponentSelection(editor.DomComponents.getWrapper());
     if (preparedCanvasDocuments.has(frameRoot)) return;
     preparedCanvasDocuments.add(frameRoot);
-    const selectCanvasTarget = (event) => {
-      if (event.button !== 0) return;
-      const component = getCanvasComponent(event.target);
-      if (!component) return;
-      window.setTimeout(() => {
-        if (getSelected() !== component) editor.select(component);
-      }, 0);
-    };
-    frameDocument.addEventListener("pointerdown", selectCanvasTarget, true);
-    frameDocument.addEventListener("click", selectCanvasTarget, true);
     frameDocument.addEventListener("click", (event) => {
-      const anchor = event.target.closest?.("a");
-      if (anchor) event.preventDefault();
+      if (event.target.closest?.("a")) event.preventDefault();
     });
-    frameDocument.addEventListener("dblclick", (event) => {
-      const selectedComponent = getCanvasComponent(event.target);
-      if (!selectedComponent) return;
-      if (event.target?.tagName === "IMG") {
-        editor.select(selectedComponent);
-        window.setTimeout(() => ui.imageFileInput.click(), 0);
-        return;
-      }
-      const component = closestTextBearingComponent(selectedComponent) || selectedComponent;
-      editor.select(component);
-      if (!isTextLike(component)) return;
-      if (component.getEl()?.contentEditable !== "true") component.view?.onActive?.(event);
-      if (editor.getEditing?.() !== component && component.getEl()?.contentEditable !== "true") {
-        focusTextContentEditor(component);
-      }
-    }, true);
+  }
+
+  function activateStandardDoubleClick(selectedComponent) {
+    if (!selectedComponent || selectedComponent.is?.("wrapper")) return;
+    editor.select(selectedComponent);
+    if (componentTagName(selectedComponent) === "img") {
+      window.setTimeout(() => ui.imageFileInput.click(), 0);
+      return;
+    }
+    const component = closestTextBearingComponent(selectedComponent) || selectedComponent;
+    editor.select(component);
+    if (isTextLike(component)) focusTextContentEditor(component);
   }
 
   function bindEditorEvents() {
+    window.addEventListener("pointerdown", selectHoveredCanvasComponent, true);
+    window.addEventListener("dblclick", activateHoveredCanvasComponent, true);
     editor.on("load", () => {
       state.loading = true;
       editor.UndoManager.stop();
@@ -1890,9 +2775,13 @@
     editor.on("component:styleUpdate", (component) => {
       if (component === getSelected() && componentTagName(component) === "img") updateImageControls(component);
     });
+    editor.on("undo redo", () => objectController?.refresh());
     editor.on("change:changesCount", () => {
       updateUndoRedo();
-      if (!state.loading && state.document) setDirty(true);
+      if (!state.loading && state.document) {
+        state.hasAuthorEdits = true;
+        setDirty(true);
+      }
     });
   }
 
@@ -1901,6 +2790,9 @@
     withDirtyConfirmation(openHtmlFile, "打开其他 HTML？", "当前未保存的修改将被清空。");
   });
   ui.emptyOpenFileButton.addEventListener("click", () => ui.openFileButton.click());
+  $("#empty-drafts-button").addEventListener("click", () => draftController.open());
+  $("#drafts-button").addEventListener("click", () => setMoreMenuOpen(false));
+  $("#export-mode-select").addEventListener("change", (event) => { state.exportMode = event.target.value; updateWarnings(); });
   ui.fileInput.addEventListener("change", () => {
     const [file] = ui.fileInput.files;
     loadFile(file);
@@ -1929,8 +2821,14 @@
     }
   });
 
-  ui.previewModeButton.addEventListener("click", enterPreviewMode);
-  ui.editModeButton.addEventListener("click", syncPreviewToEditor);
+  ui.previewModeButton.addEventListener("click", () => {
+    if (state.editingEngine === "live") setLiveCompatMode("preview");
+    else enterPreviewMode();
+  });
+  ui.editModeButton.addEventListener("click", () => {
+    if (state.editingEngine === "live") setLiveCompatMode("edit");
+    else syncPreviewToEditor();
+  });
   ui.documentNameButton.addEventListener("click", startDocumentNameEdit);
   ui.documentNameInput.addEventListener("blur", () => finishDocumentNameEdit(true));
   ui.documentNameInput.addEventListener("keydown", (event) => {
@@ -1957,9 +2855,19 @@
   ui.refreshPreviewButton.addEventListener("click", refreshPreview);
   ui.retryPreviewSyncButton.addEventListener("click", syncPreviewToEditor);
   ui.discardPreviewButton.addEventListener("click", discardPreviewChanges);
-  ui.undoButton.addEventListener("click", () => runHistoryAction("undo"));
-  ui.redoButton.addEventListener("click", () => runHistoryAction("redo"));
+  ui.undoButton.addEventListener("click", () => {
+    if (state.editingEngine === "live") postLiveCompat("beautylab-live-action", { action: "undo" });
+    else runHistoryAction("undo");
+  });
+  ui.redoButton.addEventListener("click", () => {
+    if (state.editingEngine === "live") postLiveCompat("beautylab-live-action", { action: "redo" });
+    else runHistoryAction("redo");
+  });
   ui.duplicateButton.addEventListener("click", () => {
+    if (state.editingEngine === "live") {
+      postLiveCompat("beautylab-live-action", { action: "duplicate" });
+      return;
+    }
     const selected = getSelected();
     if (!selected) return;
     const clone = selected.clone();
@@ -1967,19 +2875,44 @@
     editor.select(clone);
   });
   ui.deleteButton.addEventListener("click", () => {
+    if (state.editingEngine === "live") {
+      postLiveCompat("beautylab-live-action", { action: "delete" });
+      return;
+    }
     const selected = getSelected();
     if (selected && !selected.is("wrapper")) selected.remove();
   });
-  ui.moveUpButton.addEventListener("click", () => moveSelected(-1));
-  ui.moveDownButton.addEventListener("click", () => moveSelected(1));
-  ui.boldButton.addEventListener("click", () => toggleStyle("font-weight", "700", "400"));
+  ui.moveUpButton.addEventListener("click", () => {
+    if (state.editingEngine === "live") postLiveCompat("beautylab-live-action", { action: "move-up" });
+    else moveSelected(-1);
+  });
+  ui.moveDownButton.addEventListener("click", () => {
+    if (state.editingEngine === "live") postLiveCompat("beautylab-live-action", { action: "move-down" });
+    else moveSelected(1);
+  });
+  ui.liveSelectionActions.forEach((button) => button.addEventListener("click", () => {
+    postLiveCompat("beautylab-live-action", { action: button.dataset.liveSelectionAction });
+  }));
+  ui.liveImageResizeHandle.addEventListener("pointerdown", startLiveImageResize);
+  ui.liveImageResizeHandle.addEventListener("pointermove", moveLiveImageResize);
+  ui.liveImageResizeHandle.addEventListener("pointerup", (event) => finishLiveImageResize(event));
+  ui.liveImageResizeHandle.addEventListener("pointercancel", (event) => finishLiveImageResize(event, true));
+  ui.liveImageResizeHandle.addEventListener("lostpointercapture", (event) => finishLiveImageResize(event, true));
+  ui.liveImageResizeHandle.addEventListener("click", (event) => event.preventDefault());
+  ui.boldButton.addEventListener("click", () => {
+    if (state.editingEngine === "live") {
+      const current = Number(state.liveCompatSelection?.styles?.fontWeight) >= 600 ? "400" : "700";
+      postLiveCompat("beautylab-live-apply-style", { liveId: state.liveCompatSelection?.liveId, property: "font-weight", value: current });
+    } else toggleStyle("font-weight", "700", "400");
+  });
   ui.alignButtons.forEach((button) => button.addEventListener("click", () => {
-    getSelected()?.addStyle({ "text-align": button.dataset.align });
+    if (state.editingEngine === "live") postLiveCompat("beautylab-live-apply-style", { liveId: state.liveCompatSelection?.liveId, property: "text-align", value: button.dataset.align });
+    else getSelected()?.addStyle({ "text-align": button.dataset.align });
   }));
 
   ui.insertImageButton.addEventListener("click", () => {
     ui.insertImageButton.blur();
-    state.pendingImageInsertionComponent = getSelected();
+    state.pendingImageInsertionComponent = state.editingEngine === "live" ? null : getSelected();
     ui.insertImageFileInput.click();
   });
   ui.insertImageFileInput.addEventListener("change", async () => {
@@ -1989,46 +2922,108 @@
     ui.insertImageFileInput.value = "";
     if (!file) return;
     try {
-      await insertImageFile(file, reference);
+      if (state.editingEngine === "live") {
+        validateImageFile(file);
+        const dataUrl = await readFileAsDataUrl(file);
+        postLiveCompat("beautylab-live-insert-image", { src: dataUrl, alt: file.name || "插入的图片" });
+      } else {
+        await insertImageFile(file, reference);
+      }
     } catch (error) {
       showToast(error.message || "图片插入失败。", "error");
     }
   });
   ui.replaceImageButton.addEventListener("click", () => ui.imageFileInput.click());
+  ui.liveReplaceImageButton.addEventListener("click", () => ui.imageFileInput.click());
   ui.imageFileInput.addEventListener("change", () => {
-    replaceSelectedImage(ui.imageFileInput.files[0]);
+    const file = ui.imageFileInput.files[0];
+    if (state.editingEngine === "live" && file) {
+      (async () => {
+        try {
+          validateImageFile(file);
+          const dataUrl = await readFileAsDataUrl(file);
+          postLiveCompat("beautylab-live-replace-image", { liveId: state.liveCompatSelection?.liveId, src: dataUrl, alt: file.name || "图片" });
+        } catch (error) {
+          showToast(error.message || "图片读取失败。", "error");
+        }
+      })();
+    } else {
+      replaceSelectedImage(file);
+    }
     ui.imageFileInput.value = "";
   });
-  ui.imageWidthSlider.addEventListener("input", () => setSelectedImageWidth(ui.imageWidthSlider.value));
-  ui.imageWidthPresets.forEach((button) => button.addEventListener("click", () => {
-    setSelectedImageWidth(button.dataset.imageWidth);
-  }));
-  ui.viewportSelect.addEventListener("change", () => {
-    const frameWrapper = editor.Canvas.getFrameEl()?.parentElement;
-    if (!frameWrapper) return;
-    if (ui.viewportSelect.value === "16:9") {
-      frameWrapper.style.aspectRatio = "16 / 9";
-      frameWrapper.style.height = "auto";
-      frameWrapper.style.maxHeight = "100%";
-      frameWrapper.style.margin = "auto";
-    } else {
-      frameWrapper.style.aspectRatio = "";
-      frameWrapper.style.height = "100%";
-      frameWrapper.style.maxHeight = "";
-      frameWrapper.style.margin = "";
-    }
-    editor.refresh();
+  ui.imageWidthSlider.addEventListener("input", () => {
+    if (state.editingEngine === "live") postLiveCompat("beautylab-live-apply-style", { liveId: state.liveCompatSelection?.liveId, property: "width", value: `${ui.imageWidthSlider.value}%` });
+    else setSelectedImageWidth(ui.imageWidthSlider.value);
   });
-  ui.toggleLayersButton.addEventListener("click", () => {
-    ui.workspace.classList.toggle("left-collapsed");
-    const collapsed = ui.workspace.classList.contains("left-collapsed");
-    ui.toggleLayersButton.title = collapsed ? "展开图层" : "收起图层";
+  ui.imageWidthPresets.forEach((button) => button.addEventListener("click", () => {
+    if (state.editingEngine === "live") postLiveCompat("beautylab-live-apply-style", { liveId: state.liveCompatSelection?.liveId, property: "width", value: `${button.dataset.imageWidth}%` });
+    else setSelectedImageWidth(button.dataset.imageWidth);
+  }));
+  ui.liveImageWidthSlider.addEventListener("input", () => {
+    const width = ui.liveImageWidthSlider.value;
+    ui.liveImageWidthOutput.value = `${width}%`;
+    ui.liveImageWidthOutput.textContent = `${width}%`;
+    postLiveCompat("beautylab-live-apply-style", { liveId: state.liveCompatSelection?.liveId, property: "width", value: `${width}%` });
+  });
+  ui.liveImageWidthPresets.forEach((button) => button.addEventListener("click", () => {
+    const width = button.dataset.liveImageWidth;
+    ui.liveImageWidthSlider.value = width;
+    ui.liveImageWidthOutput.value = `${width}%`;
+    ui.liveImageWidthOutput.textContent = `${width}%`;
+    postLiveCompat("beautylab-live-apply-style", { liveId: state.liveCompatSelection?.liveId, property: "width", value: `${width}%` });
+  }));
+  ui.liveStyleFields.forEach((field) => {
+    let timer = null;
+    const apply = (liveId, value) => {
+      if (state.editingEngine !== "live" || !liveId) return;
+      postLiveCompat("beautylab-live-apply-style", { liveId, property: field.dataset.liveStyle, value });
+    };
+    field.addEventListener("input", () => {
+      const liveId = state.liveCompatSelection?.liveId;
+      const value = field.dataset.unit && field.value !== "" ? `${field.value}${field.dataset.unit}` : field.value;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => apply(liveId, value), field.matches("select, input[type=color]") ? 0 : 140);
+    });
+  });
+  ui.liveStyleButtons.forEach((button) => button.addEventListener("click", () => {
+    const liveId = state.liveCompatSelection?.liveId;
+    if (state.editingEngine !== "live" || !liveId) return;
+    postLiveCompat("beautylab-live-apply-style", {
+      liveId,
+      property: button.dataset.liveStyleButton,
+      value: button.dataset.liveStyleValue,
+    });
+  }));
+  ui.liveAddOptionButton.addEventListener("click", () => {
+    postLiveCompat("beautylab-live-select-action", { liveId: state.liveCompatSelection?.liveId, action: "add", label: "新选项", value: `option-${(state.liveCompatSelection?.selectOptions?.length || 0) + 1}` });
+  });
+  ui.liveRemoveOptionButton.addEventListener("click", () => {
+    const selection = state.liveCompatSelection;
+    const options = selection?.selectOptions || [];
+    if (!selection?.liveId || !options.length) return;
+    postLiveCompat("beautylab-live-select-action", { liveId: selection.liveId, action: "remove", index: options.length - 1 });
+  });
+  function setLayersCollapsed(collapsed) {
+    ui.workspace.classList.toggle("left-collapsed", collapsed);
+    ui.toggleLayersButton.title = i18n.t(collapsed ? "展开图层" : "收起图层");
     ui.toggleLayersButton.setAttribute("aria-label", ui.toggleLayersButton.title);
     ui.toggleLayersButton.setAttribute("aria-pressed", String(collapsed));
-    const icon = ui.toggleLayersButton.querySelector("svg");
+    ui.toggleLayersButton.setAttribute("aria-expanded", String(!collapsed));
+    const icon = ui.toggleLayersButton.querySelector("svg, i");
     if (icon) icon.outerHTML = `<i data-lucide="${collapsed ? "panel-left-open" : "panel-left-close"}"></i>`;
     refreshIcons(ui.toggleLayersButton);
-    window.setTimeout(() => editor.refresh(), 180);
+  }
+
+  ui.toggleLayersButton.addEventListener("click", () => {
+    setLayersCollapsed(!ui.workspace.classList.contains("left-collapsed"));
+    window.setTimeout(() => {
+      if (state.editingEngine === "live") {
+        renderLiveSelectionToolbar(state.liveCompatSelection);
+        renderLiveImageResizeHandle(state.liveCompatSelection);
+      }
+      else editor?.refresh();
+    }, 180);
   });
 
   ui.warningsButton.addEventListener("click", () => openWarnings(false));
@@ -2058,7 +3053,15 @@
   document.addEventListener("click", (event) => {
     if (!ui.moreMenu.hidden && !ui.moreMenuWrap.contains(event.target)) setMoreMenuOpen(false);
   });
-  window.addEventListener("resize", () => setMoreMenuOpen(false));
+  window.addEventListener("resize", () => {
+    setMoreMenuOpen(false);
+    if (state.editingEngine === "live") {
+      renderLiveSelectionToolbar(state.liveCompatSelection);
+      renderLiveImageResizeHandle(state.liveCompatSelection);
+    }
+  });
+
+  ui.liveCompatButton.addEventListener("click", toggleLiveCompat);
 
   ui.changelogButton.addEventListener("click", () => {
     setMoreMenuOpen(false);
@@ -2074,12 +3077,86 @@
     setDirty(state.dirty);
     updateSaveButton();
     if (editor) updateSelectionUI();
+    updateLiveCompatMenu();
+    setLayersPanelMode(state.editingEngine === "live");
+    if (state.editingEngine === "live") updateLiveCompatRuntimeStatus();
   });
   ui.ecoButton.addEventListener("click", () => {
     applyEcoMode(!ui.appShell.classList.contains("eco-mode"));
   });
 
   window.addEventListener("message", (event) => {
+    if (state.editingEngine === "live" && validLiveCompatMessage(event)) {
+      const message = event.data || {};
+      if (message.type === "beautylab-live-ready" || message.type === "beautylab-preview-ready") {
+        canvasView.refresh();
+        state.liveCompatReady = true;
+        updateLiveCompatRuntimeStatus();
+        ui.documentState.textContent = state.mode === "preview" ? "实时预览模式" : "实时兼容模式";
+        postLiveCompat("beautylab-live-set-mode", { mode: state.mode });
+        return;
+      }
+      if (message.type === "beautylab-resource-status") {
+        state.liveCompatResources = {
+          total: Math.max(0, Number(message.total) || 0),
+          loaded: Math.max(0, Number(message.loaded) || 0),
+          failed: Math.max(0, Number(message.failed) || 0),
+          pending: Math.max(0, Number(message.pending) || 0),
+          online: message.online !== false,
+          failedUrls: Array.isArray(message.failedUrls) ? message.failedUrls.slice(0, 8) : [],
+        };
+        updateLiveCompatRuntimeStatus();
+        return;
+      }
+      if (message.type === "beautylab-live-tree") {
+        state.liveCompatLayers = Array.isArray(message.layers)
+          ? message.layers.slice(0, 600).map((layer) => ({
+              liveId: String(layer?.liveId || ""),
+              tag: String(layer?.tag || "element"),
+              label: String(layer?.label || ""),
+              depth: Math.max(0, Math.min(10, Number(layer?.depth) || 0)),
+              hasChildren: Boolean(layer?.hasChildren),
+              locked: Boolean(layer?.locked),
+              hidden: Boolean(layer?.hidden),
+            }))
+          : [];
+        renderLiveLayers();
+        return;
+      }
+      if (message.type === "beautylab-live-selection") {
+        state.liveCompatSelection = message.selection || null;
+        renderLiveSelectionUI();
+        return;
+      }
+      if (message.type === "beautylab-live-format") {
+        objectController.receiveFormat(message.format);
+        return;
+      }
+      if (message.type === "beautylab-live-history") {
+        state.liveCompatHistory = { canUndo: Boolean(message.canUndo), canRedo: Boolean(message.canRedo) };
+        updateUndoRedo();
+        return;
+      }
+      if (message.type === "beautylab-live-change") {
+        state.liveCompatInteracted = true;
+        state.hasAuthorEdits = true;
+        setDirty(true);
+        ui.liveCompatStatusText.textContent = "修改已应用到当前运行时页面";
+        return;
+      }
+      if (message.type === "beautylab-live-preview-activity") {
+        state.liveCompatInteracted = true;
+        state.hasAuthorEdits = true;
+        setDirty(true);
+        ui.liveCompatStatusText.textContent = "交互状态已保留，切回修改不会重建页面";
+        return;
+      }
+      if (message.type === "beautylab-live-error") {
+        showToast(message.message || "实时页面操作失败。", "error");
+        return;
+      }
+      return;
+    }
     if (state.mode !== "preview" || !validPreviewMessage(event)) return;
     const message = event.data || {};
     if (message.type === "beautylab-preview-ready") {
@@ -2092,6 +3169,8 @@
     }
     if (message.type === "beautylab-preview-interaction") {
       state.previewInteracted = true;
+      state.revision += 1;
+      draftController.schedule();
       if (!state.previewSyncing) {
         setPreviewStatus("预览中有尚未同步的交互变化", { dirty: true });
         ui.documentState.textContent = "预览变化待同步";
@@ -2140,20 +3219,22 @@
     }
     if (modifier && event.key.toLowerCase() === "z") {
       event.preventDefault();
-      runHistoryAction(event.shiftKey ? "redo" : "undo");
+      if (state.editingEngine === "live") postLiveCompat("beautylab-live-action", { action: event.shiftKey ? "redo" : "undo" });
+      else runHistoryAction(event.shiftKey ? "redo" : "undo");
     }
     if (modifier && event.key.toLowerCase() === "d") {
       event.preventDefault();
       ui.duplicateButton.click();
     }
-    if ((event.key === "Delete" || event.key === "Backspace") && getSelected() && document.activeElement === document.body) {
+    const hasDeletableSelection = state.editingEngine === "live" ? Boolean(state.liveCompatSelection) : Boolean(getSelected());
+    if ((event.key === "Delete" || event.key === "Backspace") && hasDeletableSelection && document.activeElement === document.body) {
       event.preventDefault();
       ui.deleteButton.click();
     }
   });
 
   window.addEventListener("beforeunload", (event) => {
-    if (!state.dirty && !state.previewInteracted) return;
+    if (!state.dirty && !state.previewInteracted && !state.liveCompatInteracted) return;
     event.preventDefault();
     event.returnValue = "";
   });
@@ -2174,6 +3255,7 @@
     setSelectedImageWidth,
     state,
   });
+  window.__beautyLabMarkReady?.();
   applyEcoMode(readLocalSetting(ECO_MODE_KEY) === "true", false);
   i18n.setLanguage(i18n.getLanguage());
   refreshIcons();

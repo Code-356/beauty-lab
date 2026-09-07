@@ -21,6 +21,16 @@
     return String(componentAttributes(component).class || "").split(/\s+/).includes(className);
   }
 
+  function classNames(component) {
+    return String(componentAttributes(component).class || "").split(/\s+/).filter(Boolean);
+  }
+
+  function isChoiceInput(component) {
+    if (componentTag(component) !== "input") return false;
+    const type = String(componentAttributes(component).type || "").toLowerCase();
+    return type === "checkbox" || type === "radio";
+  }
+
   function findDescendants(component, predicate, matches = []) {
     component?.components?.().forEach((child) => {
       if (predicate(child)) matches.push(child);
@@ -68,17 +78,30 @@
 
     function resolveTarget(component) {
       if (!component) return null;
-      const nativeSelect = componentTag(component) === "select"
-        ? component
-        : componentTag(component) === "option" && componentTag(component.parent?.()) === "select"
-          ? component.parent()
-          : null;
+      const nativeSelect = findAncestor(component, (candidate) => componentTag(candidate) === "select");
       if (nativeSelect) return { kind: "native", root: nativeSelect, content: nativeSelect, summary: null };
 
-      const customRoot = findAncestor(component, (candidate) => hasClass(candidate, "dropdown-group"));
+      const hintedRoot = findAncestor(component, (candidate) => {
+        const attributes = componentAttributes(candidate);
+        return hasClass(candidate, "dropdown-group")
+          || classNames(candidate).some((name) => name.includes("dropdown") || name.includes("filter-options"))
+          || attributes["data-dropdown"] !== undefined
+          || attributes.role === "listbox";
+      });
+      const optionLabel = findAncestor(component, (candidate) => componentTag(candidate) === "label" && Boolean(findDescendant(candidate, isChoiceInput)));
+      const startsInsideChoice = isChoiceInput(component) || Boolean(optionLabel);
+      const ownsChoices = findDescendants(component, isChoiceInput, []).length >= 2;
+      const customRoot = hintedRoot
+        || (startsInsideChoice
+          ? findAncestor(optionLabel || component, (candidate) => {
+              const tag = componentTag(candidate);
+              if (tag === "body" || tag === "main" || tag === "form") return false;
+              return findDescendants(candidate, isChoiceInput, []).length >= 2;
+            })
+          : ownsChoices ? component : null);
       if (!customRoot) return null;
-      const content = findDescendant(customRoot, (candidate) => hasClass(candidate, "dropdown-content"));
-      if (!content) return null;
+      const content = findDescendant(customRoot, (candidate) => hasClass(candidate, "dropdown-content")) || customRoot;
+      if (!findDescendant(content, isChoiceInput)) return null;
       const summary = findDescendant(customRoot, (candidate) => {
         const attributes = componentAttributes(candidate);
         return componentTag(candidate) === "span" && Boolean(attributes.id) && !hasClass(candidate, "filter-label");
@@ -98,7 +121,7 @@
     function options() {
       if (!selected) return [];
       if (selected.kind === "native") {
-        return selected.content.components().filter((component) => componentTag(component) === "option");
+        return findDescendants(selected.content, (component) => componentTag(component) === "option", []);
       }
       return findDescendants(selected.content, (component) => componentTag(component) === "label" && Boolean(optionInput(component)), []);
     }
@@ -219,8 +242,8 @@
                   <i data-lucide="${defaultMeta.icon}"></i>
                 </button>
                 <span class="option-action-divider" aria-hidden="true"></span>
-                <button class="mini-icon-button" data-option-action="up" type="button" title="上移选项" aria-label="上移选项" ${index === 0 ? "disabled" : ""}><i data-lucide="arrow-up"></i></button>
-                <button class="mini-icon-button" data-option-action="down" type="button" title="下移选项" aria-label="下移选项" ${index === currentOptions.length - 1 ? "disabled" : ""}><i data-lucide="arrow-down"></i></button>
+                <button class="mini-icon-button" data-option-action="up" type="button" title="上移选项" aria-label="上移选项" ${!currentOptions[index - 1] || currentOptions[index - 1].parent?.() !== option.parent?.() ? "disabled" : ""}><i data-lucide="arrow-up"></i></button>
+                <button class="mini-icon-button" data-option-action="down" type="button" title="下移选项" aria-label="下移选项" ${!currentOptions[index + 1] || currentOptions[index + 1].parent?.() !== option.parent?.() ? "disabled" : ""}><i data-lucide="arrow-down"></i></button>
                 <button class="mini-icon-button" data-option-action="duplicate" type="button" title="复制选项" aria-label="复制选项"><i data-lucide="copy"></i></button>
                 <button class="mini-icon-button danger-on-hover" data-option-action="delete" type="button" title="删除选项" aria-label="删除选项"><i data-lucide="trash-2"></i></button>
               </div>
