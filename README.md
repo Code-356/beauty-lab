@@ -2,6 +2,15 @@
 
 An offline-first visual editor for AI-generated HTML presentations and reports.
 
+Current version: **v1.10** (2026-09-23). [Open the editor](https://code-356.github.io/beauty-lab/) · [Changelog / 更新日志](CHANGELOG.md)
+
+### What's new in v1.10
+
+- Text editing no longer triggers the original page's Space/navigation shortcuts, including during IME composition.
+- **More actions → Export PNG** captures the current canvas or full document at 1× or 2× resolution, independent of editor zoom.
+- Includes missing-resource warnings, image size limits, cancellation and stale/duplicate download protection.
+- Updated bilingual guide and offline package. See the [changelog](CHANGELOG.md) for validation and capture limitations.
+
 ## Open the editor
 
 Open `index.html` through the GitHub Pages website. The editor runs entirely in the browser and supports opening local HTML files, visual text and style editing, dropdown option editing, image insertion and replacement, preview, export, direct save where supported, and printing to PDF.

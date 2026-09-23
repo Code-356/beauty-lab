@@ -3,6 +3,31 @@
 
   const BRIDGE_ATTRIBUTE = "data-beautylab-live-bridge";
 
+  // Must run before author scripts, including window capture listeners.
+  function installTextInputGuard() {
+    const held = new Set();
+    const guard = window.BeautyLabTextInputGuard = { finish: null };
+    ["keydown", "keypress", "keyup"].forEach(function (type) {
+      window.addEventListener(type, function (event) {
+        const key = event.code || event.key;
+        const target = event.target;
+        const editing = document.documentElement.hasAttribute("data-beautylab-live-edit") &&
+          target?.matches?.('[data-beautylab-live-ui="inline-text-editor"]');
+        if (!editing && !held.has(key)) return;
+        event.stopImmediatePropagation();
+        if (type === "keydown") held.add(key);
+        if (type === "keyup") held.delete(key);
+        if (editing && type === "keydown" && !event.isComposing && event.keyCode !== 229) {
+          if (event.key === "Escape" || (event.key === "Enter" && !event.shiftKey)) {
+            event.preventDefault();
+            guard.finish?.(event.key !== "Escape");
+          }
+        }
+      }, true);
+    });
+    window.addEventListener("blur", () => held.clear());
+  }
+
   function liveCompatBridge(token) {
     "use strict";
 
@@ -252,7 +277,7 @@
 
     function collectLayerTree() {
       var rows = [];
-      var blocked = "script,style,template,noscript,link,meta,[data-beautylab-live-ui]";
+      var blocked = "script,style,template,noscript,link,meta,[data-beautylab-live-ui],.html2canvas-container";
       var walk = function (element, depth) {
         if (!element || rows.length >= 600 || element.matches(blocked)) return;
         var tag = element.tagName.toLowerCase();
@@ -654,15 +679,6 @@
       document.documentElement.appendChild(editor);
       directEditor = editor;
       directEditContext = context;
-      editor.addEventListener("keydown", function (keyboardEvent) {
-        if (keyboardEvent.key === "Escape") {
-          keyboardEvent.preventDefault();
-          finishDirectTextEdit(false);
-        } else if (keyboardEvent.key === "Enter" && !keyboardEvent.shiftKey) {
-          keyboardEvent.preventDefault();
-          finishDirectTextEdit(true);
-        }
-      });
       editor.addEventListener("blur", function () {
         window.setTimeout(function () { if (directEditor === editor) finishDirectTextEdit(true); }, 0);
       });
@@ -1243,6 +1259,8 @@
       scheduleViewportSelection();
     }).observe(document.documentElement, { childList: true, subtree: true });
 
+    if (window.BeautyLabTextInputGuard) window.BeautyLabTextInputGuard.finish = finishDirectTextEdit;
+    window.BeautyLabCommitDirectText = function () { finishDirectTextEdit(true); };
     syncViewportWidth();
     editorStyle();
     setMode("edit");
@@ -1261,6 +1279,10 @@
     });
     const parser = new DOMParser();
     const documentNode = parser.parseFromString(previewHtml, "text/html");
+    const keyboardGuard = documentNode.createElement("script");
+    keyboardGuard.setAttribute(BRIDGE_ATTRIBUTE, "");
+    keyboardGuard.textContent = `(${installTextInputGuard.toString()})();`;
+    documentNode.head.prepend(keyboardGuard);
     const bridge = documentNode.createElement("script");
     bridge.setAttribute(BRIDGE_ATTRIBUTE, "");
     bridge.textContent = `${global.BeautyLabObjectTools ? global.BeautyLabObjectTools.bootstrapSource() : ""}\n(${liveCompatBridge.toString()})(${JSON.stringify(token)});`;

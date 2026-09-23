@@ -566,7 +566,7 @@
         syncFormState();
         var runtimeState = collectRuntimeState();
         var body = document.body.cloneNode(true);
-        body.querySelectorAll('style[data-beautylab-live-style]').forEach(function (node) { node.remove(); });
+        body.querySelectorAll('style[data-beautylab-live-style], .html2canvas-container, [data-beautylab-live-ui]').forEach(function (node) { node.remove(); });
         body.querySelectorAll('[data-beautylab-live-draggable]').forEach(function (element) {
           var original = element.getAttribute('data-beautylab-live-draggable-original');
           if (original === '__none__' || original == null) element.removeAttribute('draggable');
@@ -671,6 +671,7 @@
     bridge.setAttribute("data-beautylab-preview-bridge", "");
     bridge.textContent = createPreviewBridgeScript(token, options);
     documentNode.body.append(bridge);
+    global.BeautyLabPng?.inject(documentNode, token);
     return `<!doctype html>\n${documentNode.documentElement.outerHTML}`;
   }
 

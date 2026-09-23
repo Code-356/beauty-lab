@@ -24,6 +24,7 @@
     liveCompatMenuState: $("#live-compat-menu-state"),
     saveButton: $("#save-button"),
     exportButton: $("#export-button"),
+    pngExportButton: $("#png-export-button"),
     printButton: $("#print-button"),
     userGuideButton: $("#user-guide-button"),
     fileInput: $("#html-file-input"),
@@ -208,6 +209,20 @@
       renderLiveImageResizeHandle(state.liveCompatSelection);
       postLiveCompat("beautylab-live-request-selection");
     },
+  });
+  const pngController = BeautyLabPng.create({
+    getEpoch: () => state.documentEpoch,
+    getFileName: () => state.document?.fileName || "Untitled.html",
+    getTarget: () => {
+      if (!state.document || state.loading) return null;
+      if (state.editingEngine === "live") return state.liveCompatReady ? { frame: ui.liveCompatFrame, token: state.liveCompatToken } : null;
+      if (state.mode === "preview") return state.previewReady ? { frame: ui.previewFrame, token: state.previewToken } : null;
+      return { frame: editor.Canvas.getFrameEl(), token: "standard", direct: true };
+    },
+    flush: flushPendingTextEdits,
+    notify: showToast,
+    closeMenu: () => setMoreMenuOpen(false),
+    t: value => i18n.t(value),
   });
   draftController = BeautyLabDraftUI.create({
     showToast,
@@ -738,7 +753,7 @@
   function setDocumentAvailability(available) {
     ui.appShell.classList.toggle("no-document", !available);
     ui.emptyState.hidden = available;
-    [ui.editModeButton, ui.previewModeButton, ui.exportButton, ui.printButton, ui.warningsButton, ui.insertImageButton, ui.toggleLayersButton, ui.liveCompatButton].forEach((button) => {
+    [ui.editModeButton, ui.previewModeButton, ui.exportButton, ui.pngExportButton, ui.printButton, ui.warningsButton, ui.insertImageButton, ui.toggleLayersButton, ui.liveCompatButton].forEach((button) => {
       button.disabled = !available;
     });
     updateSaveButton();
@@ -1096,7 +1111,7 @@
         if (announce) showToast("文字修改已应用");
       };
       input.addEventListener("keydown", (event) => {
-        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") input.blur();
+        if (!event.isComposing && event.keyCode !== 229 && (event.ctrlKey || event.metaKey) && event.key === "Enter") input.blur();
       });
       input.addEventListener("input", () => {
         window.clearTimeout(commitTimer);
@@ -1411,7 +1426,7 @@
       });
       input.addEventListener("blur", commit);
       input.addEventListener("keydown", (event) => {
-        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") input.blur();
+        if (!event.isComposing && event.keyCode !== 229 && (event.ctrlKey || event.metaKey) && event.key === "Enter") input.blur();
       });
       field.append(label, input);
       ui.liveTextList.append(field);
@@ -2851,6 +2866,7 @@
     setMoreMenuOpen(false);
     await printOutput();
   });
+  ui.pngExportButton.addEventListener("click", () => pngController.open());
   ui.userGuideButton.addEventListener("click", openUserGuide);
   ui.refreshPreviewButton.addEventListener("click", refreshPreview);
   ui.retryPreviewSyncButton.addEventListener("click", syncPreviewToEditor);
@@ -3217,6 +3233,8 @@
       ui.saveButton.click();
       return;
     }
+    // Let text fields own selection, clipboard, deletion and native undo.
+    if (event.isComposing || event.keyCode === 229 || event.target?.isContentEditable || event.target?.closest?.('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return;
     if (modifier && event.key.toLowerCase() === "z") {
       event.preventDefault();
       if (state.editingEngine === "live") postLiveCompat("beautylab-live-action", { action: event.shiftKey ? "redo" : "undo" });

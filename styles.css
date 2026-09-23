@@ -2498,3 +2498,11 @@ body.eco-mode .dialog-footer {
   font-size: 10px;
   line-height: 1.5;
 }
+/* PNG export controls use the existing dialog system. */
+.png-options { display: grid; gap: 12px; }
+.png-options select { width: 100%; min-height: 38px; padding: 6px 10px; }
+.png-note { color: var(--muted, #666); font-size: 12px; line-height: 1.6; }
+#png-warnings { max-height: 160px; overflow: auto; overflow-wrap: anywhere; padding-left: 20px; }
+#png-warnings:empty { display: none; }
+#png-status { margin: 0; }
+#png-incomplete-label { font-size: 13px; }

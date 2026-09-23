@@ -3,7 +3,7 @@
   const PAYLOAD_ID = "beautylab-edit-document";
 
   function runtime(initial, editing) {
-    const excluded = 'script,[data-beautylab-live-ui],[data-beautylab-live-style],[data-beautylab-object-ui]';
+    const excluded = 'script,[data-beautylab-live-ui],[data-beautylab-live-style],[data-beautylab-object-ui],.html2canvas-container';
     const nativeClass = (value) => String(value || "").split(/\s+/).filter((name) => name && !/^beautylab-live-(selected|hover)$/.test(name)).join(" ");
     const allowed = (node) => node.nodeType === 3 || (node.nodeType === 1 && !node.matches(excluded));
     const children = (node) => Array.from(node.childNodes).filter(allowed);
